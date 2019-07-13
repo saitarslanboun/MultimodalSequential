@@ -1,5 +1,3 @@
-''' Define the Transformer model '''
-
 from torch.nn.utils.rnn import pack_padded_sequence, pad_packed_sequence
 from rnmtplus.multihead_attention import *
 from rnmtplus.Layers import EncoderLayer, DecoderLayer
@@ -11,8 +9,6 @@ import numpy as np
 import rnmtplus.Constants as Constants
 import torchvision.models as models
 import torch.nn.functional as F
-
-__author__ = "Hasan Sait Arslan"
 
 class ImageEncoder(nn.Module):
     def __init__(self, d_model):
@@ -184,18 +180,3 @@ class RNMTPlus(nn.Module):
         seq_logit = self.tgt_word_proj(decoder_output)
 
         return seq_logit.view(-1, seq_logit.size(2))
-
-    def validate(self, image, src):
-
-        V = self.image_encoder(image)
-        encoder_outputs = self.text_encoder(src)
-
-        tgt_seq = torch.ones((src.size(0), 1)).long().cuda()
-        for a in range(49):
-            output, last_hidden = self.decoder(tgt_seq, encoder_outputs, V)
-            output = self.tgt_word_proj(output)
-            output = output.argmax(2)[:, -1]
-            tgt_seq = torch.cat((tgt_seq.clone(), output.unsqueeze(1)), dim=1)
-            encoder_outputs['dec_init_state'] = last_hidden.unsqueeze(0)
-        
-        return tgt_seq
