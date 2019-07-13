@@ -2,8 +2,6 @@
 import torch.nn as nn
 import torch
 
-__author__ = "Hasan Sait Arslan"
-
 class EncoderLayer(nn.Module):
 
     def __init__(self, d_embed, d_hidden):

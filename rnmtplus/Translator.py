@@ -7,7 +7,6 @@ from torch.autograd import Variable
 from rnmtplus.Models import RNMTPlus
 
 class Translator(object):
-    ''' Load with trained model and handle the beam search '''
 
     def __init__(self, opt):
         self.opt = opt
