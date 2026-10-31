@@ -29,7 +29,7 @@ text+image input.
 The folders under `experiments/` are the original experiment folders with data, checkpoints, logs and
 predictions removed; the code in them is unchanged. The root-level code is
 `experiments/RakutenDatasetExperiments/TXT+IMG/EncoderDecoder/model/` without docstrings and an unused
-`validate()` method.
+`validate()` method, and with the fix described under [Known issue](#known-issue).
 
 ## Models
 
@@ -132,17 +132,19 @@ counts as correct if it equals any of them.
 
 The experiments were run in 2019 with Python 3.6 and PyTorch 1.x with CUDA (at least 1.1, for
 `pack_padded_sequence(..., enforce_sorted=False)`; parts of the code call `.cuda()` unconditionally),
-torchvision, NumPy, Pillow and tqdm. The code has not been updated for current PyTorch versions.
-The heat-map script also needs OpenCV, scikit-image and matplotlib.
+torchvision, NumPy, Pillow and tqdm. The code has not been updated for current PyTorch versions; the
+root-level code has been checked to run (preprocessing, two epochs of training with the settings of
+`work/train.sh`, and decoding, on synthetic data) with Python 3.7, PyTorch 1.1.0 and torchvision 0.3.0 on
+an NVIDIA V100 GPU. The heat-map script also needs OpenCV, scikit-image and matplotlib.
 A few small helper scripts are Python 2: `check_acc_chain.py`, `extract_subs.py`, `get_max_len.py`,
 `prepare_freqs*.py`, and `extract_unseen.py` in the Amazon folder.
 
 ## Known issue
 
-In the root-level code and in `experiments/RakutenDatasetExperiments/TXT+IMG/EncoderDecoder/model/`,
-`Decoder.forward` also returns the attention weights (added for the heat maps), but `RNMTPlus.forward`
-unpacks only two values, so training fails with `ValueError: too many values to unpack`. To train with
-this code, change that line in `rnmtplus/Models.py` to
+In `experiments/RakutenDatasetExperiments/TXT+IMG/EncoderDecoder/model/`, `Decoder.forward` also returns
+the attention weights (added for the heat maps), but `RNMTPlus.forward` unpacks only two values, so
+training fails with `ValueError: too many values to unpack`. This is fixed in the root-level code. To train
+from the experiment folder, change that line in its `rnmtplus/Models.py` to
 
 ```python
 decoder_output, _, _ = self.decoder(tgt_seq, encoder_outputs, V)
