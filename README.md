@@ -129,9 +129,10 @@ python run.py $S evaluate  -data_dir $K -work_dir $W
 `train` (`train.py -kaggle_dir $K -seed 1`) first prepares the data in `$W/data` (`kaggle_data.py`):
 
 - the 44,446 products of `styles.csv`, with the titles and attribute chains of the paper's data files (spaces in
-  a value become `_`, an empty value `None`);
+  a value become `_`, an empty value `None`), without product 28319, a test record ("RTV_LoadTest") whose
+  attributes do not match its image (`-exclude_ids`);
 - the split: the products shuffled with `numpy.random.RandomState(seed)`, whose numbers are the same in every
-  NumPy version. The first 5,000 are the test set, the next 5,000 the validation set, the other 34,446 the
+  NumPy version. The first 5,000 are the test set, the next 5,000 the validation set, the other 34,445 the
   training set (`-valid_size` and `-test_size` give other sizes, or fractions if below 1);
 - a SentencePiece model trained on the training titles with the settings of the paper's model (unigram, 4,000
   pieces, all characters), and the titles encoded with it;
@@ -174,6 +175,11 @@ dataset in the same way, as the paper describes, without changing the models:
 | Regularization of Vaswani et al. | dropout 0.1 | dropout 0.1 and label smoothing 0.1 | `-label_smoothing 0.1` |
 | Amazon epochs | the checkpoint of the 8th epoch (`model.7.chkpt`) | 7 epochs and the last model, as the paper describes | `-epoch 7 -save_mode last` |
 | Token vocabularies | the most frequent token shares the index of `<UNK>` | every token has its own index | `build_vocab.py -distinct_unk` |
+| Missing attribute values (Kaggle: `NA` in `styles.csv`, `None` for an empty field; 0.8% of the products) | values that the models learn to predict and that are scored | left out of the vocabularies, the losses (index -1, `ignore_index`) and the scores; after a missing value, the Sequential decoder gets `<UNK>` as input | `"missing_values": ["NA", "None"]` (`-missing_values NA,None`) |
+
+The Kaggle settings also leave out product 28319, a test record ("RTV_LoadTest") whose attributes do not match
+its image (`"exclude_ids"`): for `experiments/kaggle_fixed/`, `run.py` writes the data files without it to
+`WORK/data`, which all stages then read.
 
 The architecture, the optimizer, the learning rate schedule, the batch size and the early stopping after three
 epochs without improvement are those of the paper in all settings, and every dataset uses the vocabularies of
@@ -327,7 +333,10 @@ and `experiments/kaggle_seeded/` change them: see [Settings for a fair compariso
   chain accuracy logged in training is that of `evaluate.py` for the validation predictions of `translate.py`
   with the kept checkpoint (also on the real Kaggle data). With `-frozen_resnet`, the BatchNorm layers keep the
   ImageNet statistics. With the default options, the results are those of the code before these options (10
-  settings).
+  settings). With `missing_values`, the missing values of the Kaggle data are left out of the vocabularies, the
+  losses (checked against the losses computed without them) and the scores; the 274 missing values of the
+  training set of seed 1 became 274 ignored targets, and the Sequential decoder gets the same input for a
+  missing value as for `<UNK>`.
 
 ## Requirements
 

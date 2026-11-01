@@ -11,6 +11,10 @@ train.py -kaggle_dir DIR -seed N calls prepare(), which
   pieces, all characters), and encodes all titles with it;
 - builds the vocabularies of the training set (build_vocab.py) and data.pt (preprocess.py).
 
+With missing_values (NA,None), these attribute values mark a missing attribute: they are not part of the target
+vocabularies, and data.pt has -1 for them, which the losses ignore. exclude_ids leaves products out of the data
+before the split, e.g. 28319, a test record ("RTV_LoadTest") with wrong attributes.
+
 It writes the data directory of the experiment:
   {train,valid,test}.img       the image file names (<id>.jpg), one product per line
   {train,valid,test}.tit       the titles
@@ -123,17 +127,21 @@ def file_md5(path):
 
 
 def prepare(kaggle_dir, output_dir, model_type, seed, valid_size=5000, test_size=5000, sp_vocab_size=4000,
-            distinct_unk=False):
+            distinct_unk=False, missing_values='', exclude_ids=''):
     ''' Writes the data directory of an experiment (see above) and returns the path of its data.pt. A directory
-    that was prepared with other settings is not overwritten. distinct_unk: build_vocab.py -distinct_unk. '''
+    that was prepared with other settings is not overwritten. distinct_unk: build_vocab.py -distinct_unk.
+    missing_values, exclude_ids: comma-separated values and product ids (see above). '''
     if not 0 <= seed < 2 ** 32:
         raise ValueError('the seed must be between 0 and 2**32 - 1')
-    products = read_products(kaggle_dir)
+    missing = [v for v in missing_values.split(',') if v]
+    excluded = [i for i in exclude_ids.split(',') if i]
+    products = [p for p in read_products(kaggle_dir) if p.id not in excluded]
     n_valid, n_test = split_sizes(valid_size, test_size, len(products))
     tgt_format = preprocess.TGT_FORMATS[model_type]
     settings = OrderedDict([('styles_csv_md5', file_md5(os.path.join(kaggle_dir, 'styles.csv'))), ('seed', seed),
                             ('valid_size', n_valid), ('test_size', n_test), ('sp_vocab_size', sp_vocab_size),
-                            ('tgt_format', tgt_format), ('distinct_unk', bool(distinct_unk))])
+                            ('tgt_format', tgt_format), ('distinct_unk', bool(distinct_unk)),
+                            ('missing_values', missing), ('exclude_ids', excluded)])
     split_file = os.path.join(output_dir, 'split.json')
     if os.path.exists(split_file):
         with io.open(split_file, encoding='utf-8') as f:
@@ -160,8 +168,9 @@ def prepare(kaggle_dir, output_dir, model_type, seed, valid_size=5000, test_size
 
     unk = ['-distinct_unk'] if distinct_unk else []
     build_vocab.main(['-mode', 'tokens', '-output_dir', output_dir, path('train.enc.tit')] + unk)
-    build_vocab.main(['-mode', TGT_VOCAB_MODES[tgt_format], '-output_dir', output_dir, path('train.lbl')] + unk)
-    args = ['-model_type', model_type, '-save_data', path('data.pt'),
+    build_vocab.main(['-mode', TGT_VOCAB_MODES[tgt_format], '-output_dir', output_dir,
+                      '-missing_values', ','.join(missing), path('train.lbl')] + unk)
+    args = ['-model_type', model_type, '-save_data', path('data.pt'), '-missing_values', ','.join(missing),
             '-src_vocab', path('train.enc.tit.json'), '-tgt_vocab', path('train.lbl.json')]
     for name in ('train', 'valid'):
         args += ['-{}_img'.format(name), path(name + '.img'), '-{}_src'.format(name), path(name + '.enc.tit'),
@@ -189,13 +198,15 @@ def main():
     parser.add_argument('-test_size', type=float, default=5000, help='products in the test set; likewise')
     parser.add_argument('-sp_vocab_size', type=int, default=4000, help='pieces of the SentencePiece model')
     parser.add_argument('-distinct_unk', action='store_true', help='build_vocab.py -distinct_unk')
+    parser.add_argument('-missing_values', default='', help='comma-separated values of missing attributes, e.g. NA,None')
+    parser.add_argument('-exclude_ids', default='', help='comma-separated ids of products to leave out')
     opt = parser.parse_args()
     if not 0 <= opt.seed < 2 ** 32:
         parser.error('-seed must be between 0 and 2**32 - 1')
     compat.seed_python_hash(opt.seed)
     compat.seed_everything(opt.seed)
     prepare(opt.kaggle_dir, opt.output_dir, opt.model_type, opt.seed, opt.valid_size, opt.test_size,
-            opt.sp_vocab_size, opt.distinct_unk)
+            opt.sp_vocab_size, opt.distinct_unk, opt.missing_values, opt.exclude_ids)
 
 
 if __name__ == '__main__':

@@ -185,9 +185,13 @@ class SequentialModel(_Model):
         return V, encoder_outputs
 
     def forward(self, image, src_seq, tgt_seq):
-        ''' The scores of the next token at every position of tgt_seq (<BOS> chain <EOS>), flattened. '''
+        ''' The scores of the next token at every position of tgt_seq (<BOS> chain <EOS>), flattened. A missing
+        value in tgt_seq (Constants.MISSING) is not a target (the loss ignores it); as the input of the next
+        position, the decoder gets <UNK> in its place. '''
         V, encoder_outputs = self.encode(image, src_seq)
-        dec_states, _, _ = self.decoder(tgt_seq[:, :-1], encoder_outputs, V)
+        dec_input = tgt_seq[:, :-1]
+        dec_input = dec_input.masked_fill(dec_input == Constants.MISSING, Constants.UNK)
+        dec_states, _, _ = self.decoder(dec_input, encoder_outputs, V)
         seq_logit = self.tgt_word_proj(dec_states)
         return seq_logit.view(-1, seq_logit.size(2))
 

@@ -24,44 +24,58 @@ from rnmtplus.Optim import ScheduledOptim
 from rnmtplus.Translator import ChainFormatter, Translator, make_batches
 
 
+def counted(gold):
+    ''' The targets that count: not PAD (index 0) and not a missing value (Constants.MISSING). '''
+    return gold.ne(Constants.PAD) & gold.ne(Constants.MISSING)
+
+
 def smoothed_cross_entropy(pred, gold, eps):
     ''' The cross-entropy with label smoothing (Vaswani et al. 2017), as attention-is-all-you-need-pytorch,
     which the original code is based on, implements it: the gold class gets 1 - eps, every other class
-    eps / (classes - 1); summed over the targets other than PAD (index 0). '''
-    one_hot = torch.zeros_like(pred).scatter(1, gold.view(-1, 1), 1)
+    eps / (classes - 1); summed over the targets other than PAD (index 0) and missing values. '''
+    one_hot = torch.zeros_like(pred).scatter(1, gold.clamp(min=0).view(-1, 1), 1)
     one_hot = one_hot * (1 - eps) + (1 - one_hot) * eps / (pred.size(1) - 1)
     loss = -(one_hot * F.log_softmax(pred, dim=1)).sum(dim=1)
-    return loss.masked_select(gold.ne(Constants.PAD)).sum()
+    return loss.masked_select(counted(gold)).sum()
 
 
 def get_performance(crit, pred, gold, smoothing=0.0):
-    ''' The loss and the number of correct predictions for the non-PAD targets. '''
+    ''' The loss and the number of correct predictions for the targets other than PAD and missing values. '''
     gold = gold.contiguous().view(-1)
     loss = smoothed_cross_entropy(pred, gold, smoothing) if smoothing else crit(pred, gold)
     pred = pred.max(1)[1]
     n_correct = pred.data.eq(gold.data)
-    n_correct = n_correct.masked_select(gold.ne(Constants.PAD).data).sum()
+    n_correct = n_correct.masked_select(counted(gold).data).sum()
     return loss, n_correct
 
 
 def compute_loss(crit, pred, tgt, opt):
     ''' The loss, the number of correct predictions and the number of targets of a batch (the multilabel model
     only has a loss). For the classifiers, index 0 (<UNK>) has the role of PAD: its targets do not count.
+    Missing values (Constants.MISSING) do not count either: the cross-entropy ignores them (ignore_index), and
+    the multilabel model leaves the binary targets of a missing attribute out of its loss.
     With -label_smoothing, the multilabel model smooths the binary targets of each attribute like the
     cross-entropy of the other models: 1 - eps for the gold value, eps / (values - 1) for the others. '''
     eps = getattr(opt, 'label_smoothing', 0.0)
     if opt.model_type == 'multilabel':
-        blocks = []
+        blocks, known = [], []
         for a, size in enumerate(opt.tgt_vocab_sizes):
-            block = torch.zeros((tgt.shape[0], size), device=tgt.device).scatter_(1, tgt[:, a].unsqueeze(1), 1)
+            values = tgt[:, a]
+            block = torch.zeros((tgt.shape[0], size), device=tgt.device).scatter_(1, values.clamp(min=0).unsqueeze(1), 1)
             if eps and size > 1:
                 block = block * (1 - eps) + (1 - block) * eps / (size - 1)
             blocks.append(block)
-        return crit(pred, torch.cat(blocks, dim=1)), None, None
+            known.append(values.ne(Constants.MISSING).unsqueeze(1).expand(-1, size))
+        gold = torch.cat(blocks, dim=1)
+        if not bool((tgt == Constants.MISSING).any()):
+            return crit(pred, gold), None, None
+        mask = torch.cat(known, dim=1).to(pred.dtype)  # the mean over the binary targets of known attributes
+        loss = (F.binary_cross_entropy_with_logits(pred, gold, reduction='none') * mask).sum() / mask.sum()
+        return loss, None, None
     if opt.model_type in ('sequential', 'multiclass'):
         gold = tgt[:, 1:] if opt.model_type == 'sequential' else tgt
         loss, n_correct = get_performance(crit, pred, gold, eps)
-        return loss, n_correct, gold.data.ne(Constants.PAD).sum()
+        return loss, n_correct, counted(gold.data).sum()
     loss = 0.0
     n_correct = 0.0
     n_words = 0.0
@@ -69,7 +83,7 @@ def compute_loss(crit, pred, tgt, opt):
         closs, cn_correct = get_performance(crit[a], pred[a], tgt[:, a], eps)
         loss += closs
         n_correct += cn_correct
-        n_words += tgt[:, a].data.ne(Constants.PAD).sum()
+        n_words += counted(tgt[:, a].data).sum()
     return loss, n_correct, n_words
 
 
@@ -165,6 +179,8 @@ class ChainAccuracy(object):
         self.chain = ChainFormatter(opt.model_type, data['dict']['tgt'], check_chain)
         self.model, self.opt = model, opt
         self.n_attributes = max(len(chain.split()) for chain in self.gold)
+        missing = getattr(data['settings'], 'missing_values', '')
+        self.missing = frozenset(v for v in missing.split(',') if v)
 
     def __call__(self):
         self.model.eval()
@@ -176,7 +192,7 @@ class ChainAccuracy(object):
                 predictions = self.translator.translate_batch(image, src, getattr(self.opt, 'tgt_vocab_sizes', None))
             for i, prediction in zip(indices, predictions):
                 lines[i] = self.chain(prediction)
-        _, errors_all = attribute_errors(self.gold, lines, self.n_attributes)
+        _, errors_all = attribute_errors(self.gold, lines, self.n_attributes, self.missing)
         return 1.0 - float(errors_all) / len(self.gold)
 
 
@@ -335,6 +351,13 @@ def main():
                         help='pieces of the SentencePiece model of the training titles')
     kaggle.add_argument('-distinct_unk', action='store_true',
                         help='the token vocabularies start the tokens at index 4 (build_vocab.py -distinct_unk)')
+    kaggle.add_argument('-missing_values', default='', metavar='VALUES',
+                        help='comma-separated attribute values that mark a missing attribute, e.g. NA,None: '
+                             'they are left out of the losses and the validation results (preprocess.py '
+                             '-missing_values)')
+    kaggle.add_argument('-exclude_ids', default='', metavar='IDS',
+                        help='comma-separated ids of products to leave out of the data, e.g. 28319, a test record '
+                             'with wrong attributes')
 
     opt = parser.parse_args()
     if (opt.data is None) == (opt.kaggle_dir is None):
@@ -363,7 +386,8 @@ def main():
     #========= Loading Dataset =========#
     if opt.kaggle_dir:
         opt.data = kaggle_data.prepare(opt.kaggle_dir, opt.kaggle_data_dir, opt.model_type, opt.seed,
-                                       opt.valid_size, opt.test_size, opt.sp_vocab_size, opt.distinct_unk)
+                                       opt.valid_size, opt.test_size, opt.sp_vocab_size, opt.distinct_unk,
+                                       opt.missing_values, opt.exclude_ids)
     data = compat.torch_load(opt.data)
     opt.max_token_seq_len = data['settings'].max_token_seq_len
     has_image, has_text = 'img' in data['train'], 'src' in data['train']
@@ -436,10 +460,10 @@ def main():
         opt.d_model, opt.n_warmup_steps, num_of_steps)
 
     def get_criterion(vocab_size):
-        ''' With PAD token zero weight '''
+        ''' With PAD token zero weight; missing values (Constants.MISSING) are ignored. '''
         weight = torch.ones(vocab_size)
         weight[Constants.PAD] = 0
-        return nn.CrossEntropyLoss(weight, reduction='sum')
+        return nn.CrossEntropyLoss(weight, reduction='sum', ignore_index=Constants.MISSING)
 
     if opt.model_type == 'multilabel':
         crit = nn.BCEWithLogitsLoss()

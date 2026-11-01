@@ -2,6 +2,13 @@
   "description": "Binary MultiLabel on the Kaggle data split with -seed, text input",
   "model_type": "multilabel",
   "modality": "txt",
+  "missing_values": [
+    "NA",
+    "None"
+  ],
+  "exclude_ids": [
+    "28319"
+  ],
   "kaggle": {
     "valid_size": 5000,
     "test_size": 5000,

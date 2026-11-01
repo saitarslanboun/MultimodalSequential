@@ -16,7 +16,7 @@ import os
 import sys
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-from evaluate import attribute_errors, chain_errors  # noqa: E402
+from evaluate import attribute_errors, chain_errors, known_attributes  # noqa: E402
 from preprocess import read_lines  # noqa: E402
 
 
@@ -35,7 +35,11 @@ def main():
     group = parser.add_mutually_exclusive_group(required=True)
     group.add_argument('-n_attributes', type=int, help='the number of attributes (Rakuten 7, Kaggle 8)')
     group.add_argument('-chains', action='store_true', help='Amazon: several gold chains per product')
+    parser.add_argument('-missing_values', default='', metavar='VALUES',
+                        help='comma-separated gold values that mark a missing attribute, e.g. NA,None (Kaggle '
+                             'settings with "missing_values"): not scored, as evaluate.py -missing_values')
     opt = parser.parse_args()
+    missing = frozenset(v for v in opt.missing_values.split(',') if v)
 
     names = (['chain'] if opt.chains else
              ['attribute %d' % (i + 1) for i in range(opt.n_attributes)] + ['full chain'])
@@ -49,8 +53,9 @@ def main():
         if opt.chains:
             rates.append([100 * chain_errors(gold, pred) / n])
         else:
-            errors, errors_all = attribute_errors(gold, pred, opt.n_attributes)
-            rates.append([100 * e / n for e in errors] + [100 * errors_all / n])
+            errors, errors_all = attribute_errors(gold, pred, opt.n_attributes, missing)
+            known = [sum(column) for column in zip(*(known_attributes(c, opt.n_attributes, missing) for c in gold))]
+            rates.append([100.0 * e / k for e, k in zip(errors, known)] + [100 * errors_all / n])
 
     width = max(len(w) for w in opt.work_dirs + ['mean +- std'])
     print('error rates (%)')

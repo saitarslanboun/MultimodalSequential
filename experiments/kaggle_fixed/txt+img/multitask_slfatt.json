@@ -3,6 +3,13 @@
   "based_on": "experiments/kaggle/txt+img/multitask_slfatt.json",
   "model_type": "multitask_slfatt",
   "modality": "txt+img",
+  "missing_values": [
+    "NA",
+    "None"
+  ],
+  "exclude_ids": [
+    "28319"
+  ],
   "vocab": {
     "distinct_unk": true
   },

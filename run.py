@@ -43,14 +43,22 @@ def script(name):
 
 
 def flags(options):
-    ''' Command-line flags for the options of a settings file: true is a flag without value. '''
+    ''' Command-line flags for the options of a settings file: true is a flag without value, a list a
+    comma-separated value. '''
     args = []
     for key, value in options.items():
         if value is True:
             args.append('-' + key)
+        elif isinstance(value, list):
+            args += ['-' + key, ','.join(str(v) for v in value)]
         elif value is not False and value is not None:
             args += ['-' + key, str(value)]
     return args
+
+
+def missing_flags(settings):
+    ''' -missing_values for the settings with "missing_values" (the attribute values of missing attributes). '''
+    return flags({'missing_values': settings['missing_values']}) if settings.get('missing_values') else []
 
 
 def default_checkpoint(settings, opt):
@@ -61,6 +69,51 @@ def default_checkpoint(settings, opt):
     if save_mode in ('best', 'last'):
         return os.path.join(opt.work_dir, 'models', 'model.{}.chkpt'.format(save_mode))
     return None
+
+
+def data_files(settings):
+    ''' The data files that the settings name: the inputs of preprocess, translate and evaluate. '''
+    names = [v for k, v in settings.get('preprocess', {}).items() if k.startswith(('train_', 'valid_'))]
+    for split in ('valid', 'test'):
+        names += list(settings.get('translate', {}).get(split, {}).values())
+        if split in settings.get('evaluate', {}):
+            names.append(settings['evaluate'][split])
+    return sorted(set(names))
+
+
+def exclude_products(settings, opt):
+    ''' For settings with "exclude_ids" (product ids, e.g. 28319, a test record of the Kaggle data with wrong
+    attributes): writes the data files of the settings without the lines of these products to WORK/data, which the
+    stages then read instead of DATA. The products of a file <split>.* are those of the image list <split>.img
+    (one per line, <id>.jpg). The vocab stage writes the files; the other stages write them if they are missing.
+    Returns the directory of the data files. '''
+    if not settings.get('exclude_ids'):
+        return opt.data_dir
+    out = os.path.join(opt.work_dir, 'data')
+    record = os.path.join(out, 'excluded.json')
+    if opt.dry_run or (opt.stage != 'vocab' and os.path.exists(record)):
+        return out
+    images = set('{}.jpg'.format(i) for i in settings['exclude_ids'])
+    if not os.path.isdir(out):
+        os.makedirs(out)
+    removed = {}
+    for name in data_files(settings):
+        split = name.split('.')[0]
+        with io.open(os.path.join(opt.data_dir, split + '.img'), encoding='utf-8') as f:
+            drop = set(k for k, line in enumerate(f.read().split('\n')) if line.strip() in images)
+        with open(os.path.join(opt.data_dir, name), 'rb') as f:
+            lines = f.read().split(b'\n')
+        trailing = lines[-1] == b''
+        lines = lines[:-1] if trailing else lines
+        kept = [line for k, line in enumerate(lines) if k not in drop]
+        with open(os.path.join(out, name), 'wb') as f:
+            f.write(b'\n'.join(kept) + (b'\n' if trailing else b''))
+        removed[name] = len(lines) - len(kept)
+    with io.open(record, 'w', encoding='utf-8') as f:
+        f.write(json.dumps({'exclude_ids': settings['exclude_ids'], 'lines_removed': removed}, indent=2,
+                           sort_keys=True) + u'\n')
+    print('[Info] {} without the products {}: lines removed {}'.format(out, ', '.join(settings['exclude_ids']), removed))
+    return out
 
 
 def kaggle_commands(settings, opt):
@@ -78,7 +131,9 @@ def kaggle_commands(settings, opt):
                 '-kaggle_data_dir', work('data'), '-save_model', work('models'), '-log', work('log')]
         if 'img' in modality:
             args += ['-image_dir', image_dir]
-        return [[script('train.py')] + args + flags(settings['kaggle']) + flags(settings['train'])]
+        return [[script('train.py')] + args + missing_flags(settings) +
+                flags({'exclude_ids': settings.get('exclude_ids')}) + flags(settings['kaggle']) +
+                flags(settings['train'])]
     if opt.stage == 'translate':
         args = ['-model_type', model_type, '-model', default_checkpoint(settings, opt),
                 '-vocab', prepared('data.pt'), '-output', work(PREDICTIONS[opt.split])]
@@ -89,14 +144,15 @@ def kaggle_commands(settings, opt):
         return [[script('translate.py')] + args + flags(settings['translate'])]
     args = ['-gold', prepared(opt.split + '.lbl'), '-pred', work(PREDICTIONS[opt.split]),
             '-n_attributes', str(settings['evaluate']['n_attributes'])]
-    return [[script('evaluate.py')] + args]
+    return [[script('evaluate.py')] + args + missing_flags(settings)]
 
 
 def commands(settings, opt):
     ''' The commands (argument lists) of the stage. '''
     if 'kaggle' in settings:
         return kaggle_commands(settings, opt)
-    data = lambda name: os.path.join(opt.data_dir, name)
+    data_dir = exclude_products(settings, opt)
+    data = lambda name: os.path.join(data_dir, name)
     work = lambda name: os.path.join(opt.work_dir, name)
     model_type = settings['model_type']
     images = 'img' in settings['modality']
@@ -107,11 +163,12 @@ def commands(settings, opt):
         modes = {'src_vocab': 'tokens',
                  'tgt_vocab': {'sequential': 'tokens', 'multiclass': 'chains'}.get(model_type, 'attributes')}
         return [[script('build_vocab.py'), '-mode', mode, '-output_dir', opt.work_dir,
-                 data(settings['preprocess'][key][:-len('.json')])] + flags(settings.get('vocab', {}))
+                 data(settings['preprocess'][key][:-len('.json')])] + flags(settings.get('vocab', {})) +
+                (missing_flags(settings) if key == 'tgt_vocab' else [])
                 for key, mode in sorted(modes.items()) if key in settings['preprocess']]
 
     if opt.stage == 'preprocess':
-        args = ['-model_type', model_type, '-save_data', work('data.pt')]
+        args = ['-model_type', model_type, '-save_data', work('data.pt')] + missing_flags(settings)
         for key, value in settings['preprocess'].items():
             if key in ('src_vocab', 'tgt_vocab'):
                 args += ['-' + key, work(value)]
@@ -146,7 +203,7 @@ def commands(settings, opt):
     evaluate = settings['evaluate']
     args = ['-gold', data(evaluate[opt.split]), '-pred', work(PREDICTIONS[opt.split])]
     args += ['-chains'] if evaluate.get('chains') else ['-n_attributes', str(evaluate['n_attributes'])]
-    return [[script('evaluate.py')] + args]
+    return [[script('evaluate.py')] + args + missing_flags(settings)]
 
 
 def main():

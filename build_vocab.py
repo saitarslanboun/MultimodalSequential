@@ -5,6 +5,9 @@ Modes:
   indices 0-3 are <BLANK>, <BOS>, <EOS> and <UNK>, then the tokens by decreasing frequency. As in the
   original code, the most frequent token also gets index 3, the index of <UNK>; with -distinct_unk, the
   tokens start at index 4, so that every token has its own index.
+
+With -missing_values (the attribute chains of the Kaggle data: NA, None), these values mark a missing attribute:
+they are left out of the vocabularies, and in chains mode, the chains with a missing value get no class.
 - chains: the class vocabulary of the multiclass model: <UNK> (0), then the attribute chains (whole
   lines) by decreasing frequency.
 - attributes: one vocabulary per attribute (position in the chain) for the multilabel and multitask
@@ -113,10 +116,12 @@ def by_decreasing_frequency(word_freqs):
     return [words[ii] for ii in sorted_idx[::-1]]
 
 
-def build_token_vocab(lines, distinct_unk=False):
+def build_token_vocab(lines, distinct_unk=False, missing=()):
     word_freqs = OrderedDict()
     for line in lines:
         for w in line.strip().split(' '):
+            if w in missing:
+                continue
             if w not in word_freqs:
                 word_freqs[w] = 0
             word_freqs[w] += 1
@@ -131,10 +136,12 @@ def build_token_vocab(lines, distinct_unk=False):
     return worddict
 
 
-def build_chain_vocab(lines):
+def build_chain_vocab(lines, missing=()):
     word_freqs = OrderedDict()
     for line in lines:
         w = line.strip()
+        if missing and any(value in missing for value in w.split()):
+            continue
         if w not in word_freqs:
             word_freqs[w] = 0
         word_freqs[w] += 1
@@ -145,7 +152,7 @@ def build_chain_vocab(lines):
     return worddict
 
 
-def build_attribute_vocab(lines):
+def build_attribute_vocab(lines, missing=()):
     word_freqs = OrderedDict()
     for line in lines:
         words_in = line.strip().split()
@@ -153,6 +160,8 @@ def build_attribute_vocab(lines):
             for a in range(len(words_in)):
                 word_freqs[a] = OrderedDict()
         for a in range(len(words_in)):
+            if words_in[a] in missing:
+                continue
             if words_in[a] not in word_freqs[a]:
                 word_freqs[a][words_in[a]] = 0
             word_freqs[a][words_in[a]] += 1
@@ -175,15 +184,19 @@ def main(argv=None):
     parser.add_argument('-distinct_unk', action='store_true',
                         help='tokens: start the tokens at index 4, so that the most frequent one does not share '
                              'the index of <UNK> (3) as in the original code')
+    parser.add_argument('-missing_values', default='', metavar='VALUES',
+                        help='comma-separated values that mark a missing attribute, e.g. NA,None (left out of '
+                             'the vocabularies)')
     parser.add_argument('files', nargs='+')
     opt = parser.parse_args(argv)
+    missing = frozenset(v for v in opt.missing_values.split(',') if v)
     for filename in opt.files:
         print('Processing', filename)
         with io.open(filename, encoding='utf-8') as f:
             if opt.mode == 'tokens':
-                worddict = build_token_vocab(f, opt.distinct_unk)
+                worddict = build_token_vocab(f, opt.distinct_unk, missing)
             else:
-                worddict = BUILDERS[opt.mode](f)
+                worddict = BUILDERS[opt.mode](f, missing)
         output = filename + '.json'
         if opt.output_dir:
             output = os.path.join(opt.output_dir, os.path.basename(output))
