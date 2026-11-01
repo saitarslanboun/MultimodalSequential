@@ -176,7 +176,7 @@ class RNMTPlus(nn.Module):
 
         V = self.image_encoder(image)
         encoder_outputs = self.text_encoder(src_seq)
-        decoder_output, _ = self.decoder(tgt_seq, encoder_outputs, V)
+        decoder_output, _, _ = self.decoder(tgt_seq, encoder_outputs, V)
         seq_logit = self.tgt_word_proj(decoder_output)
 
         return seq_logit.view(-1, seq_logit.size(2))

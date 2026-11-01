@@ -1,0 +1,277 @@
+'''
+This script handling the training process.
+'''
+
+from tqdm import tqdm
+from rnmtplus.Models import RNMTPlus
+from rnmtplus.Optim import ScheduledOptim
+from DataLoader import DataLoader
+from torchvision import transforms
+
+import argparse
+import math
+import time
+import os
+import torch
+import torch.nn as nn
+import torch.optim as optim
+import rnmtplus.Constants as Constants
+import numpy
+
+def get_performance(crit, pred, gold, smoothing=False, num_class=None):
+    ''' Apply label smoothing if needed '''
+
+    # TODO: Add smoothing
+    if smoothing:
+        assert bool(num_class)
+        eps = 0.1
+        gold = gold * (1 - eps) + (1 - gold) * eps / num_class
+        raise NotImplementedError
+
+    loss = crit(pred, gold)
+
+    #pred = pred.max(1)[1]
+
+    #gold = gold.contiguous().view(-1)
+    #n_correct = pred.data.eq(gold.data)
+    #n_correct = n_correct.masked_select(gold.data).sum()
+
+    return loss
+
+def train_epoch(model, training_data, crit, opt, optimizer):
+    ''' Epoch operation in training phase'''
+
+    model.train()
+
+    total_loss = 0
+    n_total_words = 0
+    n_total_correct = 0
+
+    t = tqdm(training_data, mininterval=1, desc='Training', leave=False)
+    for batch in t:
+
+        # prepare data
+        image, tgt = batch
+        tgt = torch.LongTensor(tgt).cuda()
+        tgt_onehot = []
+        for a in range(tgt.shape[1]):
+            onehot = torch.zeros((tgt.shape[0], opt.tgt_vocab_sizes[a])).cuda()
+            onehot = onehot.scatter_(1, tgt[:, a].unsqueeze(1), 1)
+            tgt_onehot.append(onehot)
+        tgt_onehot = torch.cat(tgt_onehot, dim=1)
+        gold = tgt_onehot
+
+        # forward
+        optimizer.zero_grad()
+        pred = model(image)
+
+        # backward
+        loss = get_performance(crit, pred, gold)
+        loss.backward()
+
+        # update parameters
+        optimizer.step()
+        optimizer.update_learning_rate()
+
+        # note keeping
+        #n_words = gold.sum()
+        #n_total_words += n_words
+        #n_total_correct += n_correct
+        total_loss += loss.item()
+
+        description = "Loss: " + str(loss.item())
+        t.set_description(description)
+
+    return total_loss #/n_total_words.float(), n_total_correct.float()/n_total_words.float()
+
+def eval_epoch(model, validation_data, crit, opt, epoch):
+    ''' Epoch operation in evaluation phase '''
+
+    model.eval()
+
+    total_loss = 0
+    n_total_words = 0
+    n_total_correct = 0
+
+    t = tqdm(validation_data, mininterval=1, desc='Validating', leave=False)
+    for batch in t:
+
+        # prepare data
+        image, tgt = batch
+        tgt = torch.LongTensor(tgt).cuda()
+        tgt_onehot = []
+        for a in range(tgt.shape[1]):
+            onehot = torch.zeros((tgt.shape[0], opt.tgt_vocab_sizes[a])).cuda()
+            onehot = onehot.scatter_(1, tgt[:, a].unsqueeze(1), 1)
+            tgt_onehot.append(onehot)
+        tgt_onehot = torch.cat(tgt_onehot, dim=1)
+        gold = tgt_onehot
+
+        # forward
+        pred = model(image)
+
+        # backward
+        loss = get_performance(crit, pred, gold) 
+
+        # note keeping
+        #n_words = gold.data.ne(Constants.PAD).sum()
+        #n_total_words += n_words
+        #n_total_correct += n_correct
+        total_loss += loss.item()
+
+        description = "Loss: " + str(loss.item())
+        t.set_description(description)
+
+    return total_loss #/n_total_words.float(), n_total_correct.float()/n_total_words.float()
+
+def train(model, training_data, validation_data, crit, optimizer, opt):
+    ''' Start training '''
+
+    log_train_file = None
+    log_valid_file = None
+
+    if opt.log:
+        log_train_file = opt.log + '.train.log'
+        log_valid_file = opt.log + ".valid.log"
+
+        print('[Info] Training performance will be written to file: {}'.format(
+            log_train_file))
+        print('[Info] Validation performance will be written to file: {}'.format(
+            log_valid_file))
+
+        with open(log_train_file, 'w') as log_tf:
+            log_tf.write('epoch,loss\n')
+        with open(log_valid_file, 'w') as log_vf:
+            log_vf.write('epoch,loss\n')
+
+    for epoch_i in range(opt.epoch):
+        print('[ Epoch', epoch_i, ']')
+
+        start = time.time()
+        train_loss = train_epoch(model, training_data, crit, opt, optimizer)
+        print('  - (Training)   loss: {loss: 8.5f} %, '\
+              'elapse: {elapse:3.3f} min'.format(
+                  loss=train_loss,
+                  elapse=(time.time()-start)/60))
+
+        start = time.time()
+        valid_loss = eval_epoch(model, validation_data, crit, opt, epoch_i)
+        print('  - (Validation)   loss: {loss: 8.5f} %, '\
+              'elapse: {elapse:3.3f} min'.format(
+                  loss=valid_loss,
+                  elapse=(time.time()-start)/60))
+
+        model_state_dict = model.state_dict()
+        checkpoint = {
+            'model': model_state_dict,
+            'settings': opt,
+            'epoch': epoch_i}
+
+        if opt.save_model:
+            model_name = os.path.join(opt.save_model, "model." + str(epoch_i) + ".chkpt")
+            torch.save(checkpoint, model_name)
+
+        if log_train_file:
+            with open(log_train_file, 'a') as log_tf:
+                log_tf.write('{epoch},{loss: 8.5f}\n'.format(
+                    epoch=epoch_i, loss=train_loss))
+            with open(log_valid_file, 'a') as log_vf:
+                log_vf.write('{epoch},{loss: 8.5f}\n'.format(
+                    epoch=epoch_i, loss=valid_loss))
+
+def main():
+    ''' Main function '''
+    parser = argparse.ArgumentParser()
+
+    parser.add_argument('-data', required=True)
+    parser.add_argument('-image_dir', required=True)
+
+    parser.add_argument('-epoch', type=int, default=500)
+    parser.add_argument('-batch_size', type=int, default=64)
+
+    parser.add_argument('-d_model', type=int, default=512)
+    parser.add_argument('-n_warmup_steps', type=int, default=4000)
+
+    parser.add_argument('-dropout', type=float, default=0.1)
+
+    parser.add_argument('-log', default=None)
+    parser.add_argument('-save_model', default=None)
+    parser.add_argument('-save_mode', type=str, choices=['all', 'best'], default='best')
+
+    parser.add_argument('-no_cuda', action='store_true')
+    parser.add_argument('-crop_size', type=int, default=224, help='size for randomly cropping images')
+
+    parser.add_argument('-pretrained', type=str, default="")
+
+    opt = parser.parse_args()
+    opt.cuda = not opt.no_cuda
+    opt.d_word_vec = opt.d_model
+
+    #========= Loading Dataset =========#
+    data = torch.load(opt.data)
+    opt.max_token_seq_len = data['settings'].max_token_seq_len
+
+    #========= Image Preprocessing =========#
+    transform = transforms.Compose([
+        transforms.RandomResizedCrop(opt.crop_size),
+        transforms.RandomHorizontalFlip(),
+        transforms.ToTensor(),
+        transforms.Normalize((0.485, 0.456, 0.406),
+                             (0.229, 0.224, 0.225))])
+
+    #========= Preparing DataLoader =========#
+    training_data = DataLoader(
+        transform,
+        opt.image_dir,
+        data['dict']['tgt'],
+        image_insts=data['train']['img'],
+        tgt_insts=data['train']['tgt'],
+        batch_size=opt.batch_size,
+        cuda=opt.cuda)
+
+    validation_data = DataLoader(
+        transform,
+        opt.image_dir,
+        data['dict']['tgt'],
+        image_insts=data['valid']['img'],
+        tgt_insts=data['valid']['tgt'],
+        batch_size=int(opt.batch_size/3),
+        shuffle=False,
+        test=True,
+        cuda=opt.cuda)
+
+    opt.tgt_vocab_size, opt.tgt_vocab_sizes = training_data.tgt_vocab_size
+
+    print(opt)
+
+    rnmtplus = RNMTPlus(
+        opt.tgt_vocab_size,
+        d_model=opt.d_model,
+        dropout=opt.dropout)
+
+    if opt.pretrained:
+        checkpoint = torch.load(opt.pretrained)
+        rnmtplus.load_state_dict(checkpoint['model'])
+        num_of_steps = int(opt.pretrained.split(".")[1])
+    else:
+        num_of_steps = 0
+
+    optimizer = ScheduledOptim(
+        optim.Adam(
+            rnmtplus.get_trainable_parameters(),
+            betas=(0.9, 0.98), eps=1e-09),
+        opt.d_model, opt.n_warmup_steps, num_of_steps)
+
+    def get_criterion(vocab_size):
+        return nn.BCEWithLogitsLoss()
+
+    crit = get_criterion(training_data.tgt_vocab_size)
+
+    if opt.cuda:
+        rnmtplus = rnmtplus.cuda()
+        crit = crit.cuda()
+
+    train(rnmtplus, training_data, validation_data, crit, optimizer, opt)
+
+if __name__ == '__main__':
+    main()
