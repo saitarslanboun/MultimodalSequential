@@ -122,9 +122,10 @@ def file_md5(path):
     return md5.hexdigest()
 
 
-def prepare(kaggle_dir, output_dir, model_type, seed, valid_size=5000, test_size=5000, sp_vocab_size=4000):
+def prepare(kaggle_dir, output_dir, model_type, seed, valid_size=5000, test_size=5000, sp_vocab_size=4000,
+            distinct_unk=False):
     ''' Writes the data directory of an experiment (see above) and returns the path of its data.pt. A directory
-    that was prepared with other settings is not overwritten. '''
+    that was prepared with other settings is not overwritten. distinct_unk: build_vocab.py -distinct_unk. '''
     if not 0 <= seed < 2 ** 32:
         raise ValueError('the seed must be between 0 and 2**32 - 1')
     products = read_products(kaggle_dir)
@@ -132,7 +133,7 @@ def prepare(kaggle_dir, output_dir, model_type, seed, valid_size=5000, test_size
     tgt_format = preprocess.TGT_FORMATS[model_type]
     settings = OrderedDict([('styles_csv_md5', file_md5(os.path.join(kaggle_dir, 'styles.csv'))), ('seed', seed),
                             ('valid_size', n_valid), ('test_size', n_test), ('sp_vocab_size', sp_vocab_size),
-                            ('tgt_format', tgt_format)])
+                            ('tgt_format', tgt_format), ('distinct_unk', bool(distinct_unk))])
     split_file = os.path.join(output_dir, 'split.json')
     if os.path.exists(split_file):
         with io.open(split_file, encoding='utf-8') as f:
@@ -157,8 +158,9 @@ def prepare(kaggle_dir, output_dir, model_type, seed, valid_size=5000, test_size
     for name, indices in splits.items():
         write_lines(path(name + '.enc.tit'), [' '.join(sp.EncodeAsPieces(products[i].title)) for i in indices])
 
-    build_vocab.main(['-mode', 'tokens', '-output_dir', output_dir, path('train.enc.tit')])
-    build_vocab.main(['-mode', TGT_VOCAB_MODES[tgt_format], '-output_dir', output_dir, path('train.lbl')])
+    unk = ['-distinct_unk'] if distinct_unk else []
+    build_vocab.main(['-mode', 'tokens', '-output_dir', output_dir, path('train.enc.tit')] + unk)
+    build_vocab.main(['-mode', TGT_VOCAB_MODES[tgt_format], '-output_dir', output_dir, path('train.lbl')] + unk)
     args = ['-model_type', model_type, '-save_data', path('data.pt'),
             '-src_vocab', path('train.enc.tit.json'), '-tgt_vocab', path('train.lbl.json')]
     for name in ('train', 'valid'):
@@ -186,13 +188,14 @@ def main():
                         help='products in the validation set; a fraction of all products if below 1')
     parser.add_argument('-test_size', type=float, default=5000, help='products in the test set; likewise')
     parser.add_argument('-sp_vocab_size', type=int, default=4000, help='pieces of the SentencePiece model')
+    parser.add_argument('-distinct_unk', action='store_true', help='build_vocab.py -distinct_unk')
     opt = parser.parse_args()
     if not 0 <= opt.seed < 2 ** 32:
         parser.error('-seed must be between 0 and 2**32 - 1')
     compat.seed_python_hash(opt.seed)
     compat.seed_everything(opt.seed)
     prepare(opt.kaggle_dir, opt.output_dir, opt.model_type, opt.seed, opt.valid_size, opt.test_size,
-            opt.sp_vocab_size)
+            opt.sp_vocab_size, opt.distinct_unk)
 
 
 if __name__ == '__main__':

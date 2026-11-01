@@ -125,8 +125,9 @@ def main():
             base = [sys.executable, os.path.join(REPO, 'run.py'), path, None,
                     '-data_dir', os.path.join(root, 'kaggle_raw'), '-work_dir', work]
             stages = [('train', train + KAGGLE_OPTIONS), ('translate', translate), ('evaluate', [])]
-        else:
-            base = [sys.executable, os.path.join(REPO, 'run.py'), path, None, '-data_dir', os.path.join(root, dataset),
+        else:  # experiments/<dataset>_fixed: the data of <dataset>
+            data_dir = os.path.join(root, dataset[:-len('_fixed')] if dataset.endswith('_fixed') else dataset)
+            base = [sys.executable, os.path.join(REPO, 'run.py'), path, None, '-data_dir', data_dir,
                     '-image_dir', os.path.join(root, 'images'), '-work_dir', work]
             stages = [('vocab', []), ('preprocess', []), ('train', train + ['-seed', '1']), ('translate', translate),
                       ('evaluate', [])]

@@ -1,0 +1,42 @@
+{
+  "description": "MultiClass on Amazon, text input, with the fixes for a fair comparison",
+  "based_on": "experiments/amazon/txt/multiclass.json",
+  "model_type": "multiclass",
+  "modality": "txt",
+  "vocab": {
+    "distinct_unk": true
+  },
+  "preprocess": {
+    "train_src": "etrain.tit",
+    "train_tgt": "etrain.lbl",
+    "valid_src": "evalid.tit",
+    "valid_tgt": "evalid.lbl",
+    "src_vocab": "etrain.tit.json",
+    "tgt_vocab": "etrain.lbl.json",
+    "max_len": 1000
+  },
+  "train": {
+    "batch_size": 32,
+    "d_model": 1024,
+    "n_warmup_steps": 4000,
+    "epoch": 7,
+    "save_mode": "last",
+    "label_smoothing": 0.1,
+    "mask_padding": true
+  },
+  "translate": {
+    "valid": {
+      "src": "valid.enc.tit"
+    },
+    "test": {
+      "src": "test.enc.tit"
+    },
+    "batch_size": 32,
+    "deterministic": true
+  },
+  "evaluate": {
+    "valid": "valid.cat",
+    "test": "test.cat",
+    "chains": true
+  }
+}

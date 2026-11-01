@@ -166,8 +166,12 @@ def main(argv=None):
     train_tgt_insts = convert(train_tgt_insts, tgt_word2idx)
     valid_tgt_insts = convert(valid_tgt_insts, tgt_word2idx)
 
+    # The attribute chains of the validation set as text, for train.py -select_by chain_accuracy.
+    with io.open(opt.valid_tgt, encoding='utf-8') as f:
+        valid_chains = [line.strip() for line in f]
+    assert len(valid_chains) == len(valid_tgt_insts if tgt_format != 'attributes' else valid_tgt_insts[0])
     data = {'settings': opt, 'dict': {'tgt': tgt_word2idx}, 'train': {'tgt': train_tgt_insts},
-            'valid': {'tgt': valid_tgt_insts}}
+            'valid': {'tgt': valid_tgt_insts, 'chains': valid_chains}}
     if image:
         data['train']['img'] = train_img_insts
         data['valid']['img'] = valid_img_insts

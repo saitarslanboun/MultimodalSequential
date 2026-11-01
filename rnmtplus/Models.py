@@ -43,6 +43,12 @@ def avg_pool(states):
     return F.avg_pool1d(states.transpose(1, 2), states.shape[1]).squeeze(2)
 
 
+def masked_avg_pool(states, mask):
+    ''' The average over the positions where mask is 1 (the tokens of a title, not its padding). '''
+    mask = mask.unsqueeze(2).to(states.dtype)
+    return (states * mask).sum(1) / mask.sum(1)
+
+
 class ImageEncoder(nn.Module):
     ''' ResNet-50 up to layer3: a 14x14 grid of 1024-dimensional features for a 224x224 image. '''
 
@@ -190,12 +196,15 @@ class AttributeModel(_Model):
     ''' The baselines: classifiers on the pooled image and text encodings. '''
 
     def __init__(self, model_type, modality, n_src_vocab, n_tgt_vocab, n_layers=6, n_head=8, d_word_vec=1024,
-                 d_model=1024, dropout=0.1, proj1_bias=True, unused_slf_attention=False, pretrained=True):
+                 d_model=1024, dropout=0.1, proj1_bias=True, unused_slf_attention=False, pretrained=True,
+                 mask_padding=False):
         ''' n_tgt_vocab: the number of classes (multiclass), of attribute values (multilabel), or the list of
         the vocabulary sizes of the attributes (multitask models). proj1_bias: whether the first projection
         of the attentive models has a bias (not in the Rakuten text+image experiments).
         unused_slf_attention: an attention module that the Rakuten text+image Self-Attentive MultiTask had
-        but did not use; needed to load its checkpoint. '''
+        but did not use; needed to load its checkpoint. mask_padding: the average pooling and the attention
+        use only the tokens of the titles, not the padding of the batch, as the attention of the sequential
+        model does; the original code included the padding. '''
         super(AttributeModel, self).__init__()
         assert model_type in MODEL_TYPES and model_type != 'sequential'
         self.model_type = model_type
@@ -226,14 +235,18 @@ class AttributeModel(_Model):
             self.attention = MultiHeadAttention(d_model, n_head)
         self.d_model = d_model
         self.n_tgt_vocab = n_tgt_vocab
+        self.mask_padding = mask_padding
         self._freeze_image_encoder()
 
     def forward(self, image, src_seq):
         ''' The scores: one tensor (multiclass, multilabel) or one tensor per attribute (multitask models). '''
         V = self.image_encoder(image) if uses_image(self.modality) else None
-        T = self.text_encoder(src_seq)[0] if uses_text(self.modality) else None
+        T, src_mask = self.text_encoder(src_seq) if uses_text(self.modality) else (None, None)
+        if not self.mask_padding:
+            src_mask = None
         encodings = [X for X in (V, T) if X is not None]
-        pooled = [avg_pool(X) for X in encodings]
+        pooled = [masked_avg_pool(X, src_mask) if X is T and src_mask is not None else avg_pool(X)
+                  for X in encodings]
         features = pooled[0] if len(pooled) == 1 else torch.cat(pooled, dim=1)
         if self.model_type in ('multiclass', 'multilabel'):
             return self.tgt_word_proj(features)
@@ -247,8 +260,11 @@ class AttributeModel(_Model):
             memory = [V, T, queries]
         else:
             memory = [queries] + encodings
+        mask = None
+        if src_mask is not None:  # attend to the tokens of the titles, the image regions and the queries
+            mask = torch.cat([src_mask if X is T else src_mask.new_ones(X.shape[:2]) for X in memory], dim=1)
         memory = memory[0] if len(memory) == 1 else torch.cat(memory, dim=1)
-        context, _ = self.attention(queries, memory, memory)
+        context, _ = self.attention(queries, memory, memory, mask)
         att_input = torch.cat((queries, context), dim=2)
         return [self.tgt_word_projs2[str(a)](att_input[:, a, :]) for a in range(n_attributes)]
 
@@ -264,7 +280,8 @@ def build_model(opt, pretrained=True):
         return SequentialModel(opt.modality, n_src_vocab, opt.tgt_vocab_size, **kwargs)
     return AttributeModel(opt.model_type, opt.modality, n_src_vocab, opt.tgt_vocab_size,
                           proj1_bias=getattr(opt, 'proj1_bias', True),
-                          unused_slf_attention=getattr(opt, 'unused_slf_attention', False), **kwargs)
+                          unused_slf_attention=getattr(opt, 'unused_slf_attention', False),
+                          mask_padding=getattr(opt, 'mask_padding', False), **kwargs)
 
 
 def architecture_from_state_dict(state_dict):

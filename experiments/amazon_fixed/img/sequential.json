@@ -1,0 +1,46 @@
+{
+  "description": "Sequential on Amazon, image input, with the fixes for a fair comparison",
+  "based_on": "experiments/amazon/img/sequential.json",
+  "model_type": "sequential",
+  "modality": "img",
+  "vocab": {
+    "distinct_unk": true
+  },
+  "preprocess": {
+    "train_img": "etrain.img",
+    "train_tgt": "etrain.lbl",
+    "valid_img": "evalid.img",
+    "valid_tgt": "evalid.lbl",
+    "tgt_vocab": "etrain.lbl.json",
+    "max_len": 1000
+  },
+  "train": {
+    "batch_size": 32,
+    "d_model": 1024,
+    "n_warmup_steps": 4000,
+    "epoch": 7,
+    "save_mode": "last",
+    "label_smoothing": 0.1,
+    "train_crop": "random_resized_crop",
+    "valid_crop": "center_crop",
+    "frozen_resnet": true
+  },
+  "translate": {
+    "valid": {
+      "img": "valid.img"
+    },
+    "test": {
+      "img": "test.img"
+    },
+    "batch_size": 64,
+    "test_crop": "center_crop",
+    "decode_steps": 10,
+    "no_check_chain": true,
+    "deterministic": true
+  },
+  "evaluate": {
+    "valid": "valid.cat",
+    "test": "test.cat",
+    "chains": true
+  }
+}

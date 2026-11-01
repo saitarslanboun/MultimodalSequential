@@ -53,6 +53,16 @@ def flags(options):
     return args
 
 
+def default_checkpoint(settings, opt):
+    ''' The checkpoint to translate with: -checkpoint, or the one that -save_mode best or last keeps. '''
+    if opt.checkpoint:
+        return opt.checkpoint
+    save_mode = settings['train'].get('save_mode')
+    if save_mode in ('best', 'last'):
+        return os.path.join(opt.work_dir, 'models', 'model.{}.chkpt'.format(save_mode))
+    return None
+
+
 def kaggle_commands(settings, opt):
     ''' The commands of the stage for the Kaggle data split with -seed (experiments/kaggle_seeded): train
     prepares the data in WORK/data. '''
@@ -70,7 +80,7 @@ def kaggle_commands(settings, opt):
             args += ['-image_dir', image_dir]
         return [[script('train.py')] + args + flags(settings['kaggle']) + flags(settings['train'])]
     if opt.stage == 'translate':
-        args = ['-model_type', model_type, '-model', opt.checkpoint or work(os.path.join('models', 'model.best.chkpt')),
+        args = ['-model_type', model_type, '-model', default_checkpoint(settings, opt),
                 '-vocab', prepared('data.pt'), '-output', work(PREDICTIONS[opt.split])]
         if 'img' in modality:
             args += ['-img', prepared(opt.split + '.img'), '-image_dir', image_dir]
@@ -97,7 +107,7 @@ def commands(settings, opt):
         modes = {'src_vocab': 'tokens',
                  'tgt_vocab': {'sequential': 'tokens', 'multiclass': 'chains'}.get(model_type, 'attributes')}
         return [[script('build_vocab.py'), '-mode', mode, '-output_dir', opt.work_dir,
-                 data(settings['preprocess'][key][:-len('.json')])]
+                 data(settings['preprocess'][key][:-len('.json')])] + flags(settings.get('vocab', {}))
                 for key, mode in sorted(modes.items()) if key in settings['preprocess']]
 
     if opt.stage == 'preprocess':
@@ -120,10 +130,11 @@ def commands(settings, opt):
 
     split_files = settings['translate'][opt.split]
     if opt.stage == 'translate':
-        if not opt.checkpoint:
+        checkpoint = default_checkpoint(settings, opt)
+        if not checkpoint:
             sys.exit('give the checkpoint to translate with: -checkpoint WORK/models/model.<epoch>.chkpt '
-                     '(the paper used {})'.format(settings['paper_checkpoint']))
-        args = ['-model_type', model_type, '-model', opt.checkpoint, '-vocab', work('data.pt'),
+                     '(the paper used {})'.format(settings.get('paper_checkpoint')))
+        args = ['-model_type', model_type, '-model', checkpoint, '-vocab', work('data.pt'),
                 '-output', work(PREDICTIONS[opt.split])]
         if 'img' in split_files:
             args += ['-img', data(split_files['img']), '-image_dir', opt.image_dir]

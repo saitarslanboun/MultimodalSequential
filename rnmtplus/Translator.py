@@ -1,6 +1,8 @@
 ''' Prediction with a trained model: the highest-scoring classes for the baselines, greedy decoding for the
 Sequential model. '''
 
+from collections import OrderedDict
+
 import torch
 
 import rnmtplus.Constants as Constants
@@ -8,8 +10,63 @@ from rnmtplus import compat
 from rnmtplus.Models import architecture_from_state_dict, build_model
 
 
+def make_batches(model_type, src_insts, n_insts, batch_size):
+    ''' The batches (lists of product indices) for prediction.
+
+    The multiclass and multilabel models predicted in consecutive slices of -batch_size in the original
+    code. The titles of a batch are padded, and (without -mask_padding) the padding positions take part in
+    the average pooling of the text encodings, so these batches are kept. The other models predicted one
+    product at a time; here the products whose titles have the same length are batched together, which
+    needs no padding. '''
+    if model_type in ('multiclass', 'multilabel') or src_insts is None:
+        return [list(range(i, min(i + batch_size, n_insts))) for i in range(0, n_insts, batch_size)]
+    by_length = OrderedDict()
+    for i, inst in enumerate(src_insts):
+        by_length.setdefault(len(inst), []).append(i)
+    batches = []
+    for indices in by_length.values():
+        batches.extend(indices[j:j + batch_size] for j in range(0, len(indices), batch_size))
+    return batches
+
+
+class ChainFormatter(object):
+    ''' The attribute chain of a prediction of Translator.translate_batch, as text: the values separated by
+    spaces; "None" for a sequence of the sequential model that fails the check of -check_chain. '''
+
+    def __init__(self, model_type, tgt_dict, check_chain=True):
+        self.model_type = model_type
+        self.check_chain = check_chain
+        if model_type in ('sequential', 'multiclass'):
+            self.inv_map = {v: k for k, v in tgt_dict.items()}
+        else:
+            self.inv_maps = [{v: k for k, v in tgt_dict[str(a)].items()} for a in range(len(tgt_dict.keys()))]
+
+    def __call__(self, prediction):
+        if self.model_type == 'sequential':
+            if prediction is None:
+                return "None"
+            if self.check_chain:
+                seq = prediction[1:-1]
+            elif Constants.EOS in prediction:
+                seq = prediction[1:prediction.index(Constants.EOS)]
+            else:
+                seq = prediction[1:]
+            return " ".join(self.inv_map[val] for val in seq)
+        if self.model_type == 'multiclass':
+            return self.inv_map[prediction]
+        return " ".join(self.inv_maps[a][val] for a, val in enumerate(prediction))
+
+
 class Translator(object):
     ''' Loads a checkpoint (a file models/model.<epoch>.chkpt written by train.py) for prediction. '''
+
+    @classmethod
+    def from_model(cls, model, model_opt, opt, device):
+        ''' A Translator for a model in memory (train.py -select_by chain_accuracy). model_opt: the options of
+        the model; opt: decode_steps and check_chain (the sequential model). The caller sets model.eval(). '''
+        translator = cls.__new__(cls)
+        translator.opt, translator.model_opt, translator.model, translator.device = opt, model_opt, model, device
+        return translator
 
     def __init__(self, opt, checkpoint=None):
         ''' opt: the options of translate.py. opt.model_type is only used for checkpoints of the original

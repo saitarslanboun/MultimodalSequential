@@ -1,0 +1,45 @@
+{
+  "description": "MultiClass on Kaggle, image input, with the fixes for a fair comparison",
+  "based_on": "experiments/kaggle/img/multiclass.json",
+  "model_type": "multiclass",
+  "modality": "img",
+  "vocab": {
+    "distinct_unk": true
+  },
+  "preprocess": {
+    "train_img": "train.img",
+    "train_tgt": "train.lbl",
+    "valid_img": "valid.img",
+    "valid_tgt": "valid.lbl",
+    "tgt_vocab": "train.lbl.json",
+    "max_len": 1000
+  },
+  "train": {
+    "batch_size": 32,
+    "d_model": 1024,
+    "n_warmup_steps": 4000,
+    "save_mode": "best",
+    "patience": 3,
+    "select_by": "chain_accuracy",
+    "label_smoothing": 0.1,
+    "train_crop": "random_resized_crop",
+    "valid_crop": "center_crop",
+    "frozen_resnet": true
+  },
+  "translate": {
+    "valid": {
+      "img": "valid.img"
+    },
+    "test": {
+      "img": "test.img"
+    },
+    "batch_size": 32,
+    "test_crop": "center_crop",
+    "deterministic": true
+  },
+  "evaluate": {
+    "valid": "valid.lbl",
+    "test": "test.lbl",
+    "n_attributes": 8
+  }
+}
