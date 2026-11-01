@@ -1,0 +1,27 @@
+{
+  "description": "Binary MultiLabel on the Kaggle data split with -seed, text and image input",
+  "model_type": "multilabel",
+  "modality": "txt+img",
+  "kaggle": {
+    "valid_size": 5000,
+    "test_size": 5000,
+    "sp_vocab_size": 4000
+  },
+  "train": {
+    "batch_size": 32,
+    "d_model": 1024,
+    "n_warmup_steps": 4000,
+    "save_mode": "best",
+    "patience": 3,
+    "train_crop": "random_resized_crop",
+    "valid_crop": "center_crop"
+  },
+  "translate": {
+    "batch_size": 32,
+    "test_crop": "center_crop",
+    "deterministic": true
+  },
+  "evaluate": {
+    "n_attributes": 8
+  }
+}

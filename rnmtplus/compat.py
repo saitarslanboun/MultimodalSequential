@@ -1,7 +1,11 @@
 ''' Compatibility with PyTorch 1.1 to 2.x and the matching torchvision versions. '''
 
 import inspect
+import os
+import random
+import sys
 
+import numpy as np
 import torch
 from torchvision import models
 
@@ -40,6 +44,42 @@ def set_tf32(enabled):
     elif hasattr(backends.cudnn, 'allow_tf32'):  # PyTorch 1.7 to 2.8
         matmul.allow_tf32 = enabled
         backends.cudnn.allow_tf32 = enabled
+
+
+def seed_python_hash(seed, extra_args=()):
+    ''' Python draws the seed of its string hashes (which set the iteration order of sets) when it starts,
+    unless PYTHONHASHSEED is set. If it is not the seed, runs the script again with PYTHONHASHSEED=seed, and
+    extra_args added to its arguments; call it before the script does any work. '''
+    if os.environ.get('PYTHONHASHSEED') == str(seed):
+        return
+    if sys.flags.ignore_environment:  # python -E or -I: PYTHONHASHSEED would be ignored
+        print('[Warning] PYTHONHASHSEED is ignored with python -E or -I: the string hashes are not seeded')
+        return
+    os.environ['PYTHONHASHSEED'] = str(seed)
+    sys.stdout.flush()
+    sys.stderr.flush()
+    argv = list(getattr(sys, 'orig_argv', [sys.executable] + sys.argv)) + list(extra_args)  # orig_argv: 3.10+
+    os.execv(sys.executable, argv)
+
+
+def seed_everything(seed):
+    ''' Seeds Python's random, NumPy and PyTorch (CPU and every GPU). '''
+    random.seed(seed)
+    np.random.seed(seed)
+    torch.manual_seed(seed)
+    torch.cuda.manual_seed_all(seed)  # done by torch.manual_seed too; explicit
+
+
+def set_deterministic(enabled):
+    ''' Deterministic algorithms instead of the fastest ones: cuDNN's, and in PyTorch 1.8 and later those of every
+    operation (an operation without one raises an error). Call it before the first CUDA operation: cuBLAS is
+    only deterministic with CUBLAS_WORKSPACE_CONFIG set when it starts (CUDA 10.2 and later). '''
+    torch.backends.cudnn.benchmark = not enabled
+    torch.backends.cudnn.deterministic = enabled
+    if enabled:
+        os.environ.setdefault('CUBLAS_WORKSPACE_CONFIG', ':4096:8')
+        if hasattr(torch, 'use_deterministic_algorithms'):
+            torch.use_deterministic_algorithms(True)
 
 
 def resnet50(pretrained):

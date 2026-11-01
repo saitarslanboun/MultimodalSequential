@@ -22,10 +22,13 @@ implements all models; the settings of each experiment are in a file in `experim
 ├── translate.py      predicts attribute chains with a trained model
 ├── evaluate.py       computes the error rates of the predictions
 ├── DataLoader.py     batches of images, titles and attribute chains
+├── kaggle_data.py    splits the Kaggle data with a seed and prepares it (train.py -kaggle_dir)
 ├── rnmtplus/         the models (Models.py), prediction (Translator.py), RNMT+ layers and attention
-├── experiments/      the settings of the 42 experiments: <dataset>/<input>/<model>.json
+├── experiments/      the settings of the 42 experiments: <dataset>/<input>/<model>.json, and in
+│                     kaggle_seeded/ those of the Kaggle experiments on a split drawn with a seed
 ├── analysis/         the analysis scripts of the paper
-└── tests/            smoke_test.py: an end-to-end run of every experiment on synthetic data
+└── tests/            smoke_test.py: an end-to-end run of every experiment on synthetic data;
+                      reproducibility_test.py: the same seed gives the same results
 ```
 
 ## Models
@@ -68,7 +71,7 @@ I=/data/kaggle/images
 W=work/kaggle/txt+img/multitask_att
 python run.py $S vocab      -data_dir $D -work_dir $W   # vocabularies -> $W/*.json
 python run.py $S preprocess -data_dir $D -work_dir $W   # -> $W/data.pt
-python run.py $S train      -data_dir $D -work_dir $W -image_dir $I
+python run.py $S train      -data_dir $D -work_dir $W -image_dir $I -seed 1
 python run.py $S translate  -data_dir $D -work_dir $W -image_dir $I -split valid -checkpoint $W/models/model.9.chkpt
 python run.py $S evaluate   -data_dir $D -work_dir $W -split valid
 ```
@@ -78,6 +81,15 @@ prints it, so the scripts can also be run directly. Options after the stage are 
 override the settings file. `-split test` (the default) predicts and evaluates the test set
 (`$W/pred_test.txt`); `-split valid` the validation set (`$W/pred.txt`).
 
+Every run is seeded: `train.py` needs `-seed`, and `translate.py` uses the seed the checkpoint was trained with
+(or `-seed`). The seed sets Python's string hashes (`PYTHONHASHSEED`: the script starts again with it),
+Python's `random`, NumPy and PyTorch on the CPU and the GPUs (the initial weights, dropout, the order of the
+training data, the random image crops and flips) and the processes that load the images. In `translate.py`, the
+random crops and flips of `-test_crop` are drawn per product, so the predictions do not depend on the batches
+or the number of processes. In training, as in the original code, they come from the generators seeded with
+`-seed`: a run repeats exactly with the same `-num_workers` and with `-deterministic` (otherwise cuDNN picks
+the fastest algorithms, which can give slightly different numbers).
+
 As in the paper's runs, `train` trains for up to 500 epochs and saves a checkpoint after every epoch
 (`$W/models/model.<epoch>.chkpt`, `-save_mode all`); the logs are `$W/log.train.log` and
 `$W/log.valid.log`. In the paper, training on Rakuten and Kaggle was stopped when the validation accuracy had
@@ -85,16 +97,63 @@ not improved for three epochs, and the Amazon models were trained for a fixed nu
 To stop automatically and keep only the best checkpoint, `$W/models/model.best.chkpt`:
 
 ```bash
-python run.py $S train -data_dir $D -work_dir $W -image_dir $I -save_mode best -patience 3
+python run.py $S train -data_dir $D -work_dir $W -image_dir $I -seed 1 -save_mode best -patience 3
 ```
 
 `analysis/best_epoch.py $W/log.valid.log -metric accuracy` finds the best epoch in a log (for `multilabel`,
 which logs no accuracy, the lowest loss).
 
 The checkpoints of the original experiments load as they are: `translate.py` reads the model type from
-`-model_type` (which `run.py` passes) when the checkpoint does not record it. Predict with the `data.pt`
+`-model_type` (which `run.py` passes) when the checkpoint does not record it. They record no seed: give one
+with `-seed`. Predict with the `data.pt`
 that a checkpoint was trained with, which holds its vocabularies; options after the stage override those of
 `run.py`, for example `-vocab <experiment>/dataset/data.pt`.
+
+## The Kaggle data split with a seed
+
+The Kaggle data has no predefined validation and test sets: the paper drew one split at random, which is in the
+data files of its runs. The settings in `experiments/kaggle_seeded/` run the 18 Kaggle experiments on a split
+drawn with a seed instead. The seed sets the split, the tokenizer, the order of the training data, the image
+crops and flips, the initial weights and dropout, so a run can be repeated exactly.
+
+```bash
+S=experiments/kaggle_seeded/txt+img/sequential.json
+K=/data/kaggle_fashion   # the Kaggle data: styles.csv and images/
+W=work/kaggle_seeded/txt+img/sequential/seed1
+python run.py $S train     -data_dir $K -work_dir $W -seed 1
+python run.py $S translate -data_dir $K -work_dir $W    # the test set, with $W/models/model.best.chkpt
+python run.py $S evaluate  -data_dir $K -work_dir $W
+```
+
+`train` (`train.py -kaggle_dir $K -seed 1`) first prepares the data in `$W/data` (`kaggle_data.py`):
+
+- the 44,446 products of `styles.csv`, with the titles and attribute chains of the paper's data files (spaces in
+  a value become `_`, an empty value `None`);
+- the split: the products shuffled with `numpy.random.RandomState(seed)`, whose numbers are the same in every
+  NumPy version. The first 5,000 are the test set, the next 5,000 the validation set, the other 34,446 the
+  training set (`-valid_size` and `-test_size` give other sizes, or fractions if below 1);
+- a SentencePiece model trained on the training titles with the settings of the paper's model (unigram, 4,000
+  pieces, all characters), and the titles encoded with it;
+- the vocabularies of the training set and `data.pt`; `split.json` records the settings.
+
+Then it trains with the same seed:
+
+- Python's string hashes (`PYTHONHASHSEED`), `random`, NumPy and PyTorch (CPU and GPUs: the initial weights
+  and dropout) are seeded with it;
+- the training data of epoch e is shuffled with `numpy.random.RandomState([seed, e])`;
+- the random crop and flip of a training image are drawn from the seed, the epoch and the product, and the
+  processes that load the images are seeded from the seed, the epoch and their number, so the batches do not
+  depend on the number of processes (`-num_workers`);
+- deterministic algorithms are used: cuDNN's, and in PyTorch 1.8 and later those of all operations.
+
+`translate` uses the seed of the checkpoint.
+
+The validation and test images are resized (shorter side 256) and center-cropped to 224 × 224, without
+randomness; the training images keep the random resized crop and flip of the paper's runs. Training stops when
+the validation result has not improved for three epochs and keeps the best checkpoint. Runs with the same seed
+on the same type of GPU and the same software versions give the same files, weights, logs and predictions;
+another GPU type or other versions of PyTorch, Pillow or SentencePiece can give other numbers. The five
+products of the Kaggle data without an image get a blank image, as in the paper's runs.
 
 ## Data
 
@@ -169,13 +228,17 @@ Sequential: 493 s → 60 s).
 **Kept from the original code, although they affect the results**
 
 - The random crop of the images (`RandomCrop` or `RandomResizedCrop`, as in each experiment) and the random
-  flip are applied in validation and prediction too, so the predictions of the image models vary between runs.
+  flip are applied in validation and prediction too, so the predictions of the image models depend on the
+  seed.
 - The BatchNorm layers of the ResNet are in training mode during training.
 - The baselines average the title encodings over the padding positions of a batch.
 - The first update uses Adam's default learning rate; the schedule is applied after each update.
 - `build_vocab.py -mode tokens` gives the most frequent token index 3, the index of `<UNK>`.
 
 **Other changes**
+
+- Every run is seeded (see [Running an experiment](#running-an-experiment)); the original code drew its
+  random numbers without a seed.
 
 - The Rakuten text+image Sequential model trains; its copy failed with "too many values to unpack".
 - `evaluate.py` divides by the number of products instead of 5,000, and stops if a prediction file is shorter
@@ -204,6 +267,16 @@ Sequential: 493 s → 60 s).
   image models agree with the original stack on 93–100% of the first 500 test products: newer Pillow versions
   decode the JPEG images slightly differently (Pillow 13.0.0 and 6.2.2 differ on all of 60 Rakuten test images
   and on 26 of 60 Kaggle images).
+- **The Kaggle data split with a seed**: `kaggle_data.py` reads the titles and attribute chains of the paper's
+  data files for all 44,446 products of `styles.csv`. On both stacks above, `tests/reproducibility_test.py`
+  passes for the 18 settings, and two runs of `experiments/kaggle_seeded/txt+img/sequential.json` on the real
+  data with seed 1 (one epoch, with 4 and with 7 processes loading the images) give identical data, weights,
+  logs and test predictions. A seed gives the same split with NumPy 1.19 and 2.5; SentencePiece 0.2.0 and 0.2.2
+  learn different models from the same titles.
+- **Seeds**: on both stacks, two runs of six of the paper's settings with the same seed (and `-deterministic`)
+  give identical weights, logs and predictions, the predictions also with another number of processes loading
+  the images; with the same seed, the training is that of the code before every run was seeded (10 settings).
+  The scripts run with `PYTHONHASHSEED` set to the seed.
 
 ## Requirements
 
@@ -211,9 +284,10 @@ Python 3.6 or later, PyTorch 1.1 or later with torchvision, NumPy, Pillow and tq
 the CPU, slowly). Tested with Python 3.7, PyTorch 1.1.0, torchvision 0.3.0 and Pillow 6.2.2 (versions of
 2019, when the experiments were run with Python 3.6 and PyTorch 1.x), and with Python 3.12, PyTorch 2.14.1,
 torchvision 0.29.1 and Pillow 13.0.0, which decodes some JPEG images slightly differently (see
-[Verification](#verification)). The heat-map script also needs OpenCV and scikit-image,
-`analysis/label_stats.py frequency` matplotlib. `python tests/smoke_test.py` runs every experiment on
-synthetic data, to check an installation.
+[Verification](#verification)). The Kaggle data split with a seed needs SentencePiece (`pip install
+sentencepiece`), the heat-map script OpenCV and scikit-image, `analysis/label_stats.py frequency` matplotlib.
+`python tests/smoke_test.py` runs every experiment on synthetic data, to check an installation, and
+`python tests/reproducibility_test.py` checks that the same seed gives the same results there.
 
 ## Citation
 

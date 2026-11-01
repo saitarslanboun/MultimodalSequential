@@ -166,12 +166,12 @@ def build_attribute_vocab(lines):
 BUILDERS = {'tokens': build_token_vocab, 'chains': build_chain_vocab, 'attributes': build_attribute_vocab}
 
 
-def main():
+def main(argv=None):
     parser = argparse.ArgumentParser(description='build_vocab.py')
     parser.add_argument('-mode', required=True, choices=sorted(BUILDERS))
     parser.add_argument('-output_dir', help='where to write the .json files (default: next to the inputs)')
     parser.add_argument('files', nargs='+')
-    opt = parser.parse_args()
+    opt = parser.parse_args(argv)
     for filename in opt.files:
         print('Processing', filename)
         with io.open(filename, encoding='utf-8') as f:

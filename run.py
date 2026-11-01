@@ -16,6 +16,14 @@ Stages:
 
 Other options are passed on to the script of the stage, after those of the settings file, which they
 override; for example: python run.py SETTINGS train -data_dir DATA -image_dir IMAGES -save_mode best -patience 3
+
+The settings in experiments/kaggle_seeded/ split the Kaggle data with a seed (kaggle_data.py). DATA is then the
+Kaggle data (styles.csv and images/), and there are no vocab and preprocess stages: train splits the data with
+-seed and prepares it in WORK/data, which translate and evaluate use.
+
+    python run.py SETTINGS train -data_dir KAGGLE -work_dir WORK -seed 1
+    python run.py SETTINGS translate -data_dir KAGGLE -work_dir WORK    (WORK/models/model.best.chkpt)
+    python run.py SETTINGS evaluate -data_dir KAGGLE -work_dir WORK
 '''
 
 import argparse
@@ -45,8 +53,39 @@ def flags(options):
     return args
 
 
+def kaggle_commands(settings, opt):
+    ''' The commands of the stage for the Kaggle data split with -seed (experiments/kaggle_seeded): train
+    prepares the data in WORK/data. '''
+    work = lambda name: os.path.join(opt.work_dir, name)
+    prepared = lambda name: os.path.join(opt.work_dir, 'data', name)
+    model_type, modality = settings['model_type'], settings['modality']
+    image_dir = opt.image_dir or os.path.join(opt.data_dir, 'images')
+    if opt.stage in ('vocab', 'preprocess'):
+        sys.exit('{} has no {} stage: train splits the Kaggle data with -seed and prepares it in '
+                 'WORK/data'.format(opt.settings, opt.stage))
+    if opt.stage == 'train':
+        args = ['-model_type', model_type, '-modality', modality, '-kaggle_dir', opt.data_dir,
+                '-kaggle_data_dir', work('data'), '-save_model', work('models'), '-log', work('log')]
+        if 'img' in modality:
+            args += ['-image_dir', image_dir]
+        return [[script('train.py')] + args + flags(settings['kaggle']) + flags(settings['train'])]
+    if opt.stage == 'translate':
+        args = ['-model_type', model_type, '-model', opt.checkpoint or work(os.path.join('models', 'model.best.chkpt')),
+                '-vocab', prepared('data.pt'), '-output', work(PREDICTIONS[opt.split])]
+        if 'img' in modality:
+            args += ['-img', prepared(opt.split + '.img'), '-image_dir', image_dir]
+        if 'txt' in modality:
+            args += ['-src', prepared(opt.split + '.enc.tit')]
+        return [[script('translate.py')] + args + flags(settings['translate'])]
+    args = ['-gold', prepared(opt.split + '.lbl'), '-pred', work(PREDICTIONS[opt.split]),
+            '-n_attributes', str(settings['evaluate']['n_attributes'])]
+    return [[script('evaluate.py')] + args]
+
+
 def commands(settings, opt):
     ''' The commands (argument lists) of the stage. '''
+    if 'kaggle' in settings:
+        return kaggle_commands(settings, opt)
     data = lambda name: os.path.join(opt.data_dir, name)
     work = lambda name: os.path.join(opt.work_dir, name)
     model_type = settings['model_type']
@@ -104,8 +143,10 @@ def main():
         description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter, allow_abbrev=False)
     parser.add_argument('settings', help='experiments/<dataset>/<input>/<model>.json')
     parser.add_argument('stage', choices=STAGES)
-    parser.add_argument('-data_dir', required=True, help='the data files of the dataset')
-    parser.add_argument('-image_dir', help='the images (image models)')
+    parser.add_argument('-data_dir', required=True,
+                        help='the data files of the dataset (experiments/kaggle_seeded: the Kaggle data)')
+    parser.add_argument('-image_dir', help='the images (image models; experiments/kaggle_seeded: default '
+                                           'DATA/images)')
     parser.add_argument('-work_dir', default='.', help='for data.pt, vocabularies, models, logs and predictions')
     parser.add_argument('-split', choices=sorted(PREDICTIONS), default='test', help='translate, evaluate')
     parser.add_argument('-checkpoint', help='translate: the checkpoint to use')

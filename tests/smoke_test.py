@@ -1,5 +1,6 @@
 ''' A quick end-to-end check with synthetic data: for every settings file in experiments/ (or the given ones),
-run.py vocab, preprocess, train (two epochs of a smaller model), translate and evaluate.
+run.py vocab, preprocess, train (two epochs of a smaller model), translate and evaluate. The settings in
+experiments/kaggle_seeded/ get a synthetic styles.csv and images/ and run train (-seed 1), translate and evaluate.
 
     python tests/smoke_test.py [SETTINGS ...] [-keep DIR] [-no_cuda]
 
@@ -32,6 +33,12 @@ ATTRIBUTES = {
 AMAZON = [['Clothing', 'Women', 'Dresses'], ['Clothing', 'Men', 'Shirts', 'Casual'], ['Shoes', 'Women', 'Sandals'],
           ['Jewelry', 'Rings'], ['Clothing', 'Girls', 'Dresses'], ['Shoes', 'Men', 'Boots', 'Leather']]
 SIZES = {'train': 24, 'valid': 8, 'test': 8}
+KAGGLE_VALUES = [['Men', 'Women', 'Unisex'], ['Apparel', 'Footwear'], ['Topwear', 'Shoes'],
+                 ['Tshirts', 'Casual Shoes', 'Shirts'], ['Navy Blue', 'Black', 'White'], ['Summer', 'Winter', ''],
+                 ['2011', '2012'], ['Casual', 'Formal']]
+# For the settings in experiments/kaggle_seeded: the split sizes and a SentencePiece model for the small data.
+KAGGLE_OPTIONS = ['-seed', '1', '-valid_size', str(SIZES['valid']), '-test_size', str(SIZES['test']),
+                  '-sp_vocab_size', '40']
 
 
 def write(path, lines):
@@ -39,9 +46,30 @@ def write(path, lines):
         f.write(''.join(line + '\n' for line in lines))
 
 
+def make_kaggle_data(root, rng):
+    ''' A synthetic styles.csv and images/ in the format of the Kaggle data: some titles with commas, some
+    empty values, a product without image. '''
+    os.makedirs(os.path.join(root, 'images'))
+    header = 'id,gender,masterCategory,subCategory,articleType,baseColour,season,year,usage,productDisplayName'
+    rows = [header]
+    for k in range(sum(SIZES.values())):
+        product_id = str(1000 + k)
+        title = ' '.join(rng.choice(WORDS) for _ in range(rng.randint(3, 8)))
+        if k % 5 == 0:
+            title += ', ' + rng.choice(WORDS)
+        rows.append(','.join([product_id] + [rng.choice(v) for v in KAGGLE_VALUES] + [title]))
+        if k != 3:
+            a = np.full((260, 200, 3), rng.randrange(256), dtype=np.uint8)
+            a[rng.randrange(130):, rng.randrange(100):] = [rng.randrange(256) for _ in range(3)]
+            Image.fromarray(a).save(os.path.join(root, 'images', product_id + '.jpg'))
+    write(os.path.join(root, 'styles.csv'), rows)
+
+
 def make_data(root):
-    ''' Synthetic data in the file formats of the three datasets; root/images holds the images. '''
+    ''' Synthetic data in the file formats of the three datasets; root/images holds the images, root/kaggle_raw
+    the synthetic Kaggle data for experiments/kaggle_seeded. '''
     rng = random.Random(0)
+    make_kaggle_data(os.path.join(root, 'kaggle_raw'), rng)
     os.makedirs(os.path.join(root, 'images'))
     for k in range(10):
         a = np.full((256, 256, 3), rng.randrange(256), dtype=np.uint8)
@@ -89,14 +117,19 @@ def main():
         work = os.path.join(root, 'work', name.replace('.json', ''))
         log = os.path.join(root, 'work', name.replace('.json', '.log'))
         os.makedirs(work)
-        base = [sys.executable, os.path.join(REPO, 'run.py'), path, None, '-data_dir', os.path.join(root, dataset),
-                '-image_dir', os.path.join(root, 'images'), '-work_dir', work]
-        stages = [('vocab', []), ('preprocess', []),
-                  ('train', ['-epoch', '2', '-n_layers', '3', '-batch_size', '4', '-save_mode', 'best',
-                             '-patience', '1', '-num_workers', '2'] + cuda),
-                  ('translate', ['-checkpoint', os.path.join(work, 'models', 'model.best.chkpt'), '-batch_size', '4',
-                                 '-num_workers', '2'] + cuda),
-                  ('evaluate', [])]
+        train = ['-epoch', '2', '-n_layers', '3', '-batch_size', '4', '-save_mode', 'best', '-patience', '1',
+                 '-num_workers', '2'] + cuda
+        translate = ['-checkpoint', os.path.join(work, 'models', 'model.best.chkpt'), '-batch_size', '4',
+                     '-num_workers', '2'] + cuda
+        if dataset == 'kaggle_seeded':
+            base = [sys.executable, os.path.join(REPO, 'run.py'), path, None,
+                    '-data_dir', os.path.join(root, 'kaggle_raw'), '-work_dir', work]
+            stages = [('train', train + KAGGLE_OPTIONS), ('translate', translate), ('evaluate', [])]
+        else:
+            base = [sys.executable, os.path.join(REPO, 'run.py'), path, None, '-data_dir', os.path.join(root, dataset),
+                    '-image_dir', os.path.join(root, 'images'), '-work_dir', work]
+            stages = [('vocab', []), ('preprocess', []), ('train', train + ['-seed', '1']), ('translate', translate),
+                      ('evaluate', [])]
         start = time.time()
         status = 'ok'
         with open(log, 'w') as f:

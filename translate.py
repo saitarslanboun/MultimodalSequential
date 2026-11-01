@@ -8,7 +8,7 @@ import torch
 from tqdm import tqdm
 
 import rnmtplus.Constants as Constants
-from DataLoader import CROPS, DataLoader, image_transform
+from DataLoader import CROPS, DataLoader, PredictionSeededTransform, image_transform
 from preprocess import convert_instance_to_idx_seq, read_instances_from_file
 from rnmtplus import compat
 from rnmtplus.Models import MODEL_TYPES, uses_image, uses_text
@@ -49,7 +49,8 @@ def main():
                         help='the model type, if the checkpoint does not record it (original checkpoints)')
     parser.add_argument('-crop_size', type=int, default=224, help='size for randomly cropping images')
     parser.add_argument('-test_crop', choices=sorted(CROPS), default='random_resized_crop',
-                        help='the random crop of the images, as in the experiment')
+                        help='the crop of the images: the random crop of the experiment, or center_crop '
+                             '(resize and crop the center, without randomness)')
     parser.add_argument('-decode_steps', type=int, default=8,
                         help='sequential: the number of decoded tokens, attributes plus <EOS> '
                              '(Rakuten 8, Kaggle 9, Amazon 10)')
@@ -59,10 +60,16 @@ def main():
     parser.add_argument('-save_attention', metavar='DIR',
                         help='sequential: save the attention weights of the last decoding step to '
                              'DIR/<line>.{txt,img}_attention.pt (for analysis/visualize_heatmap.py)')
+    parser.add_argument('-seed', type=int,
+                        help='the seed of all random numbers (default: the seed the checkpoint was trained with; '
+                             'required for the checkpoints of the paper\'s runs, which record none): Python\'s '
+                             'string hashes, random, NumPy, PyTorch, the image loading processes, and the random '
+                             'crops and flips of -test_crop, drawn per product')
     parser.add_argument('-no_cuda', action='store_true')
     parser.add_argument('-num_workers', type=int, default=4, help='processes that load the images')
     parser.add_argument('-deterministic', action='store_true',
-                        help='deterministic cuDNN algorithms (slower) instead of the fastest ones')
+                        help='deterministic algorithms (slower) instead of the fastest ones: cuDNN\'s, and in '
+                             'PyTorch 1.8 and later those of all operations')
     parser.add_argument('-tf32', action='store_true',
                         help='allow TensorFloat-32 on Ampere and newer GPUs: faster, but less precise than the '
                              'float32 of the experiments')
@@ -70,11 +77,20 @@ def main():
     opt = parser.parse_args()
     opt.cuda = not opt.no_cuda
     opt.check_chain = not opt.no_check_chain
-    torch.backends.cudnn.benchmark = not opt.deterministic
-    torch.backends.cudnn.deterministic = opt.deterministic
+    checkpoint = compat.torch_load(opt.model, map_location='cpu')
+    seed = opt.seed if opt.seed is not None else getattr(checkpoint['settings'], 'seed', None)
+    if seed is None:
+        parser.error('the checkpoint records no seed (as those of the paper\'s runs): give -seed')
+    if not 0 <= seed < 2 ** 32:
+        parser.error('-seed must be between 0 and 2**32 - 1')
+    # Runs the script again (with -seed) if PYTHONHASHSEED is not the seed.
+    compat.seed_python_hash(seed, [] if opt.seed is not None else ['-seed', str(seed)])
+    compat.set_deterministic(opt.deterministic)
+    compat.seed_everything(seed)
     compat.set_tf32(opt.tf32)
 
-    translator = Translator(opt)
+    translator = Translator(opt, checkpoint)
+    del checkpoint
     model_type = translator.model_opt.model_type
     modality = translator.model_opt.modality
     if uses_image(modality) and not (opt.img and opt.image_dir):
@@ -94,10 +110,14 @@ def main():
         test_src_insts = convert_instance_to_idx_seq(test_src_word_insts, preprocess_data['dict']['src'])
     n_insts = len(test_src_insts if test_src_insts is not None else test_img_insts)
 
+    transform = None
+    if uses_image(modality):
+        transform = image_transform(opt.test_crop, opt.crop_size)
+        if opt.test_crop != 'center_crop':  # the random crops and flips, seeded per product
+            transform = PredictionSeededTransform(transform)
     test_data = DataLoader(
-        image_transform(opt.test_crop, opt.crop_size) if uses_image(modality) else None, opt.image_dir,
-        preprocess_data['dict'].get('src'), tgt_dict, image_insts=test_img_insts, src_insts=test_src_insts,
-        cuda=opt.cuda, shuffle=False, num_workers=opt.num_workers,
+        transform, opt.image_dir, preprocess_data['dict'].get('src'), tgt_dict, image_insts=test_img_insts,
+        src_insts=test_src_insts, cuda=opt.cuda, shuffle=False, num_workers=opt.num_workers, seed=seed,
         batches=make_batches(model_type, test_src_insts, n_insts, opt.batch_size))
 
     if model_type in ('sequential', 'multiclass'):
