@@ -1,0 +1,37 @@
+{
+  "experiment": "AmazonDatasetExperiments/IMG/MultiClass",
+  "description": "MultiClass on Amazon, image input",
+  "model_type": "multiclass",
+  "modality": "img",
+  "preprocess": {
+    "train_img": "etrain.img",
+    "train_tgt": "etrain.lbl",
+    "valid_img": "evalid.img",
+    "valid_tgt": "evalid.lbl",
+    "tgt_vocab": "etrain.lbl.json",
+    "max_len": 1000
+  },
+  "train": {
+    "batch_size": 32,
+    "d_model": 1024,
+    "n_warmup_steps": 4000,
+    "save_mode": "all",
+    "train_crop": "random_resized_crop"
+  },
+  "translate": {
+    "valid": {
+      "img": "valid.img"
+    },
+    "test": {
+      "img": "test.img"
+    },
+    "batch_size": 32,
+    "test_crop": "random_resized_crop"
+  },
+  "evaluate": {
+    "valid": "valid.cat",
+    "test": "test.cat",
+    "chains": true
+  },
+  "paper_checkpoint": "models/model.7.chkpt"
+}

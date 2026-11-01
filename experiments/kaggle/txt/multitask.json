@@ -1,0 +1,36 @@
+{
+  "experiment": "KaggleDatasetExperiments/TXT/MultiLabelMultiClass",
+  "description": "MultiTask on Kaggle, text input",
+  "model_type": "multitask",
+  "modality": "txt",
+  "preprocess": {
+    "train_src": "train.enc.tit",
+    "train_tgt": "train.lbl",
+    "valid_src": "valid.enc.tit",
+    "valid_tgt": "valid.lbl",
+    "src_vocab": "train.enc.tit.json",
+    "tgt_vocab": "train.lbl.json",
+    "max_len": 1000
+  },
+  "train": {
+    "batch_size": 32,
+    "d_model": 1024,
+    "n_warmup_steps": 4000,
+    "save_mode": "all"
+  },
+  "translate": {
+    "valid": {
+      "src": "valid.enc.tit"
+    },
+    "test": {
+      "src": "test.enc.tit"
+    },
+    "batch_size": 64
+  },
+  "evaluate": {
+    "valid": "valid.lbl",
+    "test": "test.lbl",
+    "n_attributes": 8
+  },
+  "paper_checkpoint": "models/model.12.chkpt"
+}

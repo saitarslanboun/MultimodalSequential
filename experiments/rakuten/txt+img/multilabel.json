@@ -1,0 +1,42 @@
+{
+  "experiment": "RakutenDatasetExperiments/TXT+IMG/MultiLabel",
+  "description": "Binary MultiLabel on Rakuten, text and image input",
+  "model_type": "multilabel",
+  "modality": "txt+img",
+  "preprocess": {
+    "train_img": "train.img",
+    "train_src": "train.tit",
+    "train_tgt": "train.lbl",
+    "valid_img": "valid.img",
+    "valid_src": "valid.tit",
+    "valid_tgt": "valid.lbl",
+    "src_vocab": "train.tit.json",
+    "tgt_vocab": "train.lbl.json",
+    "max_len": 1000
+  },
+  "train": {
+    "batch_size": 32,
+    "d_model": 1024,
+    "n_warmup_steps": 4000,
+    "save_mode": "all",
+    "train_crop": "random_resized_crop"
+  },
+  "translate": {
+    "valid": {
+      "img": "valid.img",
+      "src": "valid.tit"
+    },
+    "test": {
+      "img": "test.img",
+      "src": "test.tit"
+    },
+    "batch_size": 32,
+    "test_crop": "random_resized_crop"
+  },
+  "evaluate": {
+    "valid": "valid.lbl",
+    "test": "test.lbl",
+    "n_attributes": 7
+  },
+  "paper_checkpoint": "models/model.1.chkpt"
+}

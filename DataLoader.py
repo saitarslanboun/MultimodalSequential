@@ -1,186 +1,162 @@
-''' Data Loader class for training iteration '''
+''' Batches of images, titles and labels for training and prediction.
 
-from torch.autograd import Variable
-from PIL import Image
+The batches are those of the original code: consecutive slices of the data, which is shuffled with Python's
+random.shuffle when the loader is created and after every epoch; titles and token sequences are padded to the
+longest in the batch. Images are read and transformed in worker processes (num_workers > 0), so that loading
+overlaps with the computation on the GPU.
+'''
 
-import random
-import numpy as np
-import torch
-import rnmtplus.Constants as Constants
+import math
 import os
+import random
 
-class DataLoader(object):
-    ''' For data iteration '''
+import torch
+import torch.utils.data
+from PIL import Image
+from torchvision import transforms
 
-    def __init__(
-            self, transform, image_dir, src_word2idx, tgt_word2idx,
-            image_insts=None, src_insts=None, tgt_insts=None,
-            cuda=True, batch_size=64, shuffle=True, test=False):
+import rnmtplus.Constants as Constants
 
-        assert image_insts
-        assert src_insts
-        assert len(image_insts) >= batch_size
-        assert len(src_insts) >= batch_size
+# The target formats: token sequences (sequential), class indices (multiclass), one index per attribute.
+TGT_FORMATS = ('sequence', 'chain', 'attributes')
+CROPS = {'random_crop': 'RandomCrop', 'random_resized_crop': 'RandomResizedCrop'}
+ZERO_IMAGE_SIZE = 224  # the size of the zero image that replaces a missing or unreadable image
 
-        if tgt_insts:
-            assert len(image_insts) == len(tgt_insts)
-            assert len(src_insts) == len(tgt_insts)
 
-        self.cuda = cuda
-        self.test = test
-        self._n_batch = int(np.ceil(len(src_insts) / batch_size))
+def image_transform(crop, crop_size=224):
+    ''' The image preprocessing of the experiments, for training, validation and prediction alike: a random
+    crop (RandomCrop or RandomResizedCrop, depending on the experiment) and a random horizontal flip. '''
+    return transforms.Compose([
+        getattr(transforms, CROPS[crop])(crop_size),
+        transforms.RandomHorizontalFlip(),
+        transforms.ToTensor(),
+        transforms.Normalize((0.485, 0.456, 0.406), (0.229, 0.224, 0.225))])
 
-        self._batch_size = batch_size
 
-        self._image_insts = image_insts
-        self._src_insts = src_insts
-        self._tgt_insts = tgt_insts
+def load_image(image_dir, img_inst, transform):
+    ''' The transformed image; a zero image if the name is "None" or the file cannot be read or transformed. '''
+    if type(img_inst) is list:  # names read with read_instances_from_file: [<BOS>, name, <EOS>]
+        img_inst = img_inst[1]
+    if img_inst == "None":
+        return torch.zeros((3, ZERO_IMAGE_SIZE, ZERO_IMAGE_SIZE))
+    try:
+        return transform(Image.open(os.path.join(image_dir, img_inst)))
+    except Exception:
+        return torch.zeros((3, ZERO_IMAGE_SIZE, ZERO_IMAGE_SIZE))
 
-        src_idx2word = {idx:word for word, idx in src_word2idx.items()}
-        tgt_idx2word = {idx:word for word, idx in tgt_word2idx.items()}
 
-        self._src_word2idx = src_word2idx
-        self._src_idx2word = src_idx2word
+def pad_to_longest(insts):
+    ''' The token index lists as a LongTensor, padded with PAD to the longest. '''
+    max_len = max(len(inst) for inst in insts)
+    return torch.LongTensor([inst + [Constants.PAD] * (max_len - len(inst)) for inst in insts])
 
-        self._tgt_word2idx = tgt_word2idx
-        self._tgt_idx2word = tgt_idx2word
 
-        self._iter_count = 0
+class _Instances(torch.utils.data.Dataset):
 
-        self._need_shuffle = shuffle
-
-        if self._need_shuffle:
-            self.shuffle()
-
+    def __init__(self, image_dir, transform, image_insts, src_insts, tgt_insts):
         self.image_dir = image_dir
         self.transform = transform
+        self.image_insts = image_insts
+        self.src_insts = src_insts
+        self.tgt_insts = tgt_insts
+
+    def __len__(self):
+        return len(self.src_insts if self.src_insts is not None else self.image_insts)
+
+    def __getitem__(self, index):
+        image = None
+        if self.image_insts is not None:
+            image = load_image(self.image_dir, self.image_insts[index], self.transform)
+        src = self.src_insts[index] if self.src_insts is not None else None
+        tgt = self.tgt_insts[index] if self.tgt_insts is not None else None
+        return index, image, src, tgt
+
+
+class _Collate(object):
+
+    def __init__(self, tgt_format):
+        self.tgt_format = tgt_format
+
+    def __call__(self, items):
+        indices, images, srcs, tgts = zip(*items)
+        image = torch.stack(images) if images[0] is not None else None
+        src = pad_to_longest(srcs) if srcs[0] is not None else None
+        if tgts[0] is None:
+            tgt = None
+        elif self.tgt_format == 'sequence':
+            tgt = pad_to_longest(tgts)
+        else:
+            tgt = torch.LongTensor(list(tgts))
+        return list(indices), image, src, tgt
+
+
+class DataLoader(object):
+    ''' Iterating over it gives the batches of an epoch as tuples (indices, image, src, tgt): the indices of the
+    products in the data, the images (batch x 3 x 224 x 224), the padded titles (batch x length) and the
+    targets (a padded batch x length tensor for 'sequence', batch for 'chain', batch x attributes for
+    'attributes'); None for what the data does not have. '''
+
+    def __init__(self, transform, image_dir, src_word2idx, tgt_word2idx, image_insts=None, src_insts=None,
+                 tgt_insts=None, tgt_format='sequence', cuda=True, batch_size=64, shuffle=True, test=False,
+                 num_workers=0, batches=None):
+        ''' image_insts, src_insts, tgt_insts: the instances of data.pt (preprocess.py); for the 'attributes'
+        format, tgt_insts has one list per attribute. batches: lists of indices to use as the batches,
+        instead of slices of batch_size (no shuffling). test: not used (kept from the original code). '''
+        assert image_insts or src_insts
+        assert tgt_format in TGT_FORMATS
+        n_insts = len(src_insts) if src_insts else len(image_insts)
+        if image_insts and src_insts:
+            assert len(image_insts) == len(src_insts)
+        if tgt_insts:
+            if tgt_format == 'attributes':
+                tgt_insts = list(map(list, zip(*tgt_insts)))
+            assert len(tgt_insts) == n_insts
+        self.cuda = cuda
+        self._batch_size = batch_size
+        self._n_insts = n_insts
+        self._src_word2idx = src_word2idx
+        self._tgt_word2idx = tgt_word2idx
+        self._dataset = _Instances(image_dir, transform, image_insts or None, src_insts or None, tgt_insts or None)
+        self._collate = _Collate(tgt_format)
+        self._num_workers = num_workers if image_insts else 0
+        self._batches = batches
+        self._order = list(range(n_insts))
+        self._need_shuffle = shuffle and batches is None
+        if self._need_shuffle:
+            random.shuffle(self._order)
 
     @property
     def n_insts(self):
-        ''' Property for dataset size '''
-        return len(self._src_insts)
-
-    @property
-    def src_vocab_size(self):
-        ''' Property for vocab size '''
-        return len(self._src_word2idx)
-
-    @property
-    def tgt_vocab_size(self):
-        ''' Property for vocab size '''
-        return len(self._tgt_word2idx)
+        return self._n_insts
 
     @property
     def src_word2idx(self):
-        ''' Property for word dictionary '''
         return self._src_word2idx
 
     @property
     def tgt_word2idx(self):
-        ''' Property for word dictionary '''
         return self._tgt_word2idx
 
-    @property
-    def src_idx2word(self):
-        ''' Property for index dictionary '''
-        return self._src_idx2word
-
-    @property
-    def tgt_idx2word(self):
-        ''' Property for index dictionary '''
-        return self._tgt_idx2word
-
-    def shuffle(self):
-        ''' Shuffle data for a brand new start '''
-        if self._tgt_insts:
-            paired_insts = list(zip(self._image_insts, self._src_insts, self._tgt_insts))
-            random.shuffle(paired_insts)
-            self._image_insts, self._src_insts, self._tgt_insts = zip(*paired_insts)
-        else:
-            paired_insts = list(zip(self._image_insts, self._src_insts))
-            random.shuffle(paired_insts)
-
+    def __len__(self):
+        if self._batches is not None:
+            return len(self._batches)
+        return int(math.ceil(self._n_insts / float(self._batch_size)))
 
     def __iter__(self):
-        return self
-
-    def __next__(self):
-        return self.next()
-
-    def __len__(self):
-        return self._n_batch
-
-    def next(self):
-        ''' Get the next batch '''
-
-        def pad_to_longest(insts):
-            ''' Pad the instance to the max seq length in batch '''
-
-            max_len = max(len(inst) for inst in insts)
-
-            inst_data = np.array([
-                inst + [Constants.PAD] * (max_len - len(inst))
-                for inst in insts])
-
-            inst_position = np.array([
-                [pos_i+1 if w_i != Constants.PAD else 0 for pos_i, w_i in enumerate(inst)]
-                for inst in inst_data])
-
-            inst_data_tensor = Variable(
-                torch.LongTensor(inst_data), volatile=self.test)
-            inst_position_tensor = Variable(
-                torch.LongTensor(inst_position), volatile=self.test)
-
+        batches = self._batches
+        if batches is None:
+            batches = [self._order[i:i + self._batch_size] for i in range(0, self._n_insts, self._batch_size)]
+        if self._num_workers > 0:
+            loader = torch.utils.data.DataLoader(
+                self._dataset, batch_sampler=batches, collate_fn=self._collate, num_workers=self._num_workers,
+                pin_memory=self.cuda)
+        else:  # in this process, like the original code
+            loader = (self._collate([self._dataset[i] for i in batch]) for batch in batches)
+        for indices, image, src, tgt in loader:
             if self.cuda:
-                inst_data_tensor = inst_data_tensor.cuda()
-                inst_position_tensor = inst_position_tensor.cuda()
-            return inst_data_tensor, inst_position_tensor
-
-        if self._iter_count < self._n_batch:
-            batch_idx = self._iter_count
-            self._iter_count += 1
-
-            start_idx = batch_idx * self._batch_size
-            end_idx = (batch_idx + 1) * self._batch_size
-
-            img_insts = self._image_insts[start_idx:end_idx]
-            src_insts = self._src_insts[start_idx:end_idx]
-
-            src_data, src_pos = pad_to_longest(src_insts)
-
-            image_data = []
-            for a in range(len(img_insts)):
-                if type(img_insts[a]) is list:
-                    img_inst = img_insts[a][1]
-                else:
-                    img_inst = img_insts[a]
-                if img_inst == "None":
-                    image = torch.zeros((3, 224, 224))
-                else:
-                    inst = os.path.join(self.image_dir, img_inst)
-                    try:
-                        image = Image.open(inst)
-                        image = self.transform(image)
-                    except:
-                        image = torch.zeros((3, 224, 224))
-                image_data.append(image)
-
-            if self.cuda:
-                image_data = torch.stack(image_data).cuda()
-            else:
-                image_data = torch.stack(image_data)
-
-            if not self._tgt_insts:
-                return image_data, src_data, src_pos
-            else:
-                tgt_insts = self._tgt_insts[start_idx:end_idx]
-                tgt_data, tgt_pos = pad_to_longest(tgt_insts)
-                return image_data, (src_data, src_pos), (tgt_data, tgt_pos)
-
-        else:
-
-            if self._need_shuffle:
-                self.shuffle()
-
-            self._iter_count = 0
-            raise StopIteration()
+                image = image.cuda(non_blocking=True) if image is not None else None
+                src = src.cuda(non_blocking=True) if src is not None else None
+                tgt = tgt.cuda(non_blocking=True) if tgt is not None else None
+            yield indices, image, src, tgt
+        if self._need_shuffle:
+            random.shuffle(self._order)

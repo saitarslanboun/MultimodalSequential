@@ -1,0 +1,37 @@
+{
+  "experiment": "RakutenDatasetExperiments/TXT/EncoderDecoder",
+  "description": "Sequential on Rakuten, text input",
+  "model_type": "sequential",
+  "modality": "txt",
+  "preprocess": {
+    "train_src": "train.tit",
+    "train_tgt": "train.lbl",
+    "valid_src": "valid.tit",
+    "valid_tgt": "valid.lbl",
+    "src_vocab": "train.tit.json",
+    "tgt_vocab": "train.lbl.json",
+    "max_len": 1000
+  },
+  "train": {
+    "batch_size": 32,
+    "d_model": 1024,
+    "n_warmup_steps": 4000,
+    "save_mode": "all"
+  },
+  "translate": {
+    "valid": {
+      "src": "valid.tit"
+    },
+    "test": {
+      "src": "test.tit"
+    },
+    "batch_size": 64,
+    "decode_steps": 8
+  },
+  "evaluate": {
+    "valid": "valid.lbl",
+    "test": "test.lbl",
+    "n_attributes": 7
+  },
+  "paper_checkpoint": "models/model.5.chkpt"
+}
