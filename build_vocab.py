@@ -3,7 +3,8 @@
 Modes:
 - tokens: a token vocabulary, for titles and for the attribute chains of the sequential model; the
   indices 0-3 are <BLANK>, <BOS>, <EOS> and <UNK>, then the tokens by decreasing frequency. As in the
-  original code, the most frequent token also gets index 3, the index of <UNK>.
+  original code, the most frequent token also gets index 3, the index of <UNK>; with -distinct_unk, the
+  tokens start at index 4, so that every token has its own index.
 - chains: the class vocabulary of the multiclass model: <UNK> (0), then the attribute chains (whole
   lines) by decreasing frequency.
 - attributes: one vocabulary per attribute (position in the chain) for the multilabel and multitask
@@ -112,7 +113,7 @@ def by_decreasing_frequency(word_freqs):
     return [words[ii] for ii in sorted_idx[::-1]]
 
 
-def build_token_vocab(lines):
+def build_token_vocab(lines, distinct_unk=False):
     word_freqs = OrderedDict()
     for line in lines:
         for w in line.strip().split(' '):
@@ -124,8 +125,9 @@ def build_token_vocab(lines):
     worddict['<BOS>'] = 1
     worddict['<EOS>'] = 2
     worddict['<UNK>'] = 3
+    first = 4 if distinct_unk else 3  # 3: the most frequent token shares the index of <UNK>
     for ii, ww in enumerate(by_decreasing_frequency(word_freqs)):
-        worddict[ww] = ii + 3
+        worddict[ww] = ii + first
     return worddict
 
 
@@ -170,12 +172,18 @@ def main(argv=None):
     parser = argparse.ArgumentParser(description='build_vocab.py')
     parser.add_argument('-mode', required=True, choices=sorted(BUILDERS))
     parser.add_argument('-output_dir', help='where to write the .json files (default: next to the inputs)')
+    parser.add_argument('-distinct_unk', action='store_true',
+                        help='tokens: start the tokens at index 4, so that the most frequent one does not share '
+                             'the index of <UNK> (3) as in the original code')
     parser.add_argument('files', nargs='+')
     opt = parser.parse_args(argv)
     for filename in opt.files:
         print('Processing', filename)
         with io.open(filename, encoding='utf-8') as f:
-            worddict = BUILDERS[opt.mode](f)
+            if opt.mode == 'tokens':
+                worddict = build_token_vocab(f, opt.distinct_unk)
+            else:
+                worddict = BUILDERS[opt.mode](f)
         output = filename + '.json'
         if opt.output_dir:
             output = os.path.join(opt.output_dir, os.path.basename(output))

@@ -1,0 +1,53 @@
+{
+  "description": "Self-Attentive MultiTask on Rakuten, text and image input, with the fixes for a fair comparison",
+  "based_on": "experiments/rakuten/txt+img/multitask_slfatt.json",
+  "model_type": "multitask_slfatt",
+  "modality": "txt+img",
+  "vocab": {
+    "distinct_unk": true
+  },
+  "preprocess": {
+    "train_img": "train.img",
+    "train_src": "train.tit",
+    "train_tgt": "train.lbl",
+    "valid_img": "valid.img",
+    "valid_src": "valid.tit",
+    "valid_tgt": "valid.lbl",
+    "src_vocab": "train.tit.json",
+    "tgt_vocab": "train.lbl.json",
+    "max_len": 1000
+  },
+  "train": {
+    "batch_size": 32,
+    "d_model": 1024,
+    "n_warmup_steps": 4000,
+    "no_proj1_bias": true,
+    "unused_slf_attention": true,
+    "save_mode": "best",
+    "patience": 3,
+    "select_by": "chain_accuracy",
+    "label_smoothing": 0.1,
+    "mask_padding": true,
+    "train_crop": "random_resized_crop",
+    "valid_crop": "center_crop",
+    "frozen_resnet": true
+  },
+  "translate": {
+    "valid": {
+      "img": "valid.img",
+      "src": "valid.tit"
+    },
+    "test": {
+      "img": "test.img",
+      "src": "test.tit"
+    },
+    "batch_size": 64,
+    "test_crop": "center_crop",
+    "deterministic": true
+  },
+  "evaluate": {
+    "valid": "valid.lbl",
+    "test": "test.lbl",
+    "n_attributes": 7
+  }
+}

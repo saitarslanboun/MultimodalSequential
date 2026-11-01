@@ -1,6 +1,6 @@
 ''' The epoch with the lowest validation loss (or the highest accuracy) in a log of train.py.
 
-    python analysis/best_epoch.py WORK/log.valid.log [-metric accuracy] [-max_epoch N]
+    python analysis/best_epoch.py WORK/log.valid.log [-metric accuracy|chain_accuracy] [-max_epoch N]
 '''
 
 import argparse
@@ -10,7 +10,7 @@ import io
 def main():
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument('log')
-    parser.add_argument('-metric', choices=('loss', 'accuracy'), default='loss')
+    parser.add_argument('-metric', choices=('loss', 'accuracy', 'chain_accuracy'), default='loss')
     parser.add_argument('-max_epoch', type=int, help='only look at the epochs up to this one')
     opt = parser.parse_args()
 

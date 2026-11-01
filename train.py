@@ -9,23 +9,36 @@ import time
 
 import torch
 import torch.nn as nn
+import torch.nn.functional as F
 import torch.optim as optim
 from tqdm import tqdm
 
 import kaggle_data
 import rnmtplus.Constants as Constants
 from DataLoader import CROPS, DataLoader, SeededRandomTransform, image_transform
+from evaluate import attribute_errors
 from preprocess import TGT_FORMATS
 from rnmtplus import compat
 from rnmtplus.Models import MODALITIES, MODEL_TYPES, build_model, uses_image, uses_text
 from rnmtplus.Optim import ScheduledOptim
+from rnmtplus.Translator import ChainFormatter, Translator, make_batches
 
 
-def get_performance(crit, pred, gold):
+def smoothed_cross_entropy(pred, gold, eps):
+    ''' The cross-entropy with label smoothing (Vaswani et al. 2017), as attention-is-all-you-need-pytorch,
+    which the original code is based on, implements it: the gold class gets 1 - eps, every other class
+    eps / (classes - 1); summed over the targets other than PAD (index 0). '''
+    one_hot = torch.zeros_like(pred).scatter(1, gold.view(-1, 1), 1)
+    one_hot = one_hot * (1 - eps) + (1 - one_hot) * eps / (pred.size(1) - 1)
+    loss = -(one_hot * F.log_softmax(pred, dim=1)).sum(dim=1)
+    return loss.masked_select(gold.ne(Constants.PAD)).sum()
+
+
+def get_performance(crit, pred, gold, smoothing=0.0):
     ''' The loss and the number of correct predictions for the non-PAD targets. '''
-    loss = crit(pred, gold.contiguous().view(-1))
-    pred = pred.max(1)[1]
     gold = gold.contiguous().view(-1)
+    loss = smoothed_cross_entropy(pred, gold, smoothing) if smoothing else crit(pred, gold)
+    pred = pred.max(1)[1]
     n_correct = pred.data.eq(gold.data)
     n_correct = n_correct.masked_select(gold.ne(Constants.PAD).data).sum()
     return loss, n_correct
@@ -33,20 +46,27 @@ def get_performance(crit, pred, gold):
 
 def compute_loss(crit, pred, tgt, opt):
     ''' The loss, the number of correct predictions and the number of targets of a batch (the multilabel model
-    only has a loss). For the classifiers, index 0 (<UNK>) has the role of PAD: its targets do not count. '''
+    only has a loss). For the classifiers, index 0 (<UNK>) has the role of PAD: its targets do not count.
+    With -label_smoothing, the multilabel model smooths the binary targets of each attribute like the
+    cross-entropy of the other models: 1 - eps for the gold value, eps / (values - 1) for the others. '''
+    eps = getattr(opt, 'label_smoothing', 0.0)
     if opt.model_type == 'multilabel':
-        gold = torch.cat([torch.zeros((tgt.shape[0], size), device=tgt.device).scatter_(1, tgt[:, a].unsqueeze(1), 1)
-                          for a, size in enumerate(opt.tgt_vocab_sizes)], dim=1)
-        return crit(pred, gold), None, None
+        blocks = []
+        for a, size in enumerate(opt.tgt_vocab_sizes):
+            block = torch.zeros((tgt.shape[0], size), device=tgt.device).scatter_(1, tgt[:, a].unsqueeze(1), 1)
+            if eps and size > 1:
+                block = block * (1 - eps) + (1 - block) * eps / (size - 1)
+            blocks.append(block)
+        return crit(pred, torch.cat(blocks, dim=1)), None, None
     if opt.model_type in ('sequential', 'multiclass'):
         gold = tgt[:, 1:] if opt.model_type == 'sequential' else tgt
-        loss, n_correct = get_performance(crit, pred, gold)
+        loss, n_correct = get_performance(crit, pred, gold, eps)
         return loss, n_correct, gold.data.ne(Constants.PAD).sum()
     loss = 0.0
     n_correct = 0.0
     n_words = 0.0
     for a in range(tgt.shape[1]):
-        closs, cn_correct = get_performance(crit[a], pred[a], tgt[:, a])
+        closs, cn_correct = get_performance(crit[a], pred[a], tgt[:, a], eps)
         loss += closs
         n_correct += cn_correct
         n_words += tgt[:, a].data.ne(Constants.PAD).sum()
@@ -70,6 +90,8 @@ def run_epoch(model, data, crit, opt, optimizer=None):
     ''' One epoch of training (with an optimizer) or of evaluation (without). '''
     training = optimizer is not None
     model.train(training)
+    if training and opt.frozen_resnet and hasattr(model, 'image_encoder'):
+        model.image_encoder.eval()  # BatchNorm uses and keeps the ImageNet statistics
     total_loss = 0
     n_total_words = 0
     n_total_correct = 0
@@ -111,14 +133,54 @@ def performance_line(name, loss, accu, start, opt):
         name=name, ppl=math.exp(min(loss, 100)), accu=100 * accu, elapse=(time.time() - start) / 60)
 
 
-def log_line(epoch, loss, accu, opt):
+def log_line(epoch, loss, accu, opt, chain_accuracy=None):
     if opt.model_type == 'multilabel':
-        return '{epoch},{loss: 8.5f}\n'.format(epoch=epoch, loss=loss)
-    return '{epoch},{loss: 8.5f},{ppl: 8.5f},{accu:3.3f}\n'.format(
-        epoch=epoch, loss=loss, ppl=math.exp(min(loss, 100)), accu=100 * accu)
+        line = '{epoch},{loss: 8.5f}'.format(epoch=epoch, loss=loss)
+    else:
+        line = '{epoch},{loss: 8.5f},{ppl: 8.5f},{accu:3.3f}'.format(
+            epoch=epoch, loss=loss, ppl=math.exp(min(loss, 100)), accu=100 * accu)
+    if chain_accuracy is not None:
+        line += ',{:3.3f}'.format(100 * chain_accuracy)
+    return line + '\n'
 
 
-def train(model, training_data, validation_data, crit, optimizer, opt):
+class ChainAccuracy(object):
+    ''' The full-chain accuracy of the model's predictions for the validation set (-select_by chain_accuracy):
+    the classifiers' highest-scoring values, the greedy decoding of the sequential model, as translate.py
+    predicts, counted as evaluate.py counts errors. '''
+
+    def __init__(self, model, data, transform, opt, device):
+        modality = opt.modality
+        src_insts = data['valid']['src'] if uses_text(modality) else None
+        img_insts = data['valid']['img'] if uses_image(modality) else None
+        self.gold = data['valid']['chains']
+        self.loader = DataLoader(
+            transform, opt.image_dir, data['dict'].get('src'), data['dict']['tgt'], image_insts=img_insts,
+            src_insts=src_insts, cuda=opt.cuda, shuffle=False, num_workers=opt.num_workers,
+            seed=opt.seed if opt.kaggle_dir else None,
+            batches=make_batches(opt.model_type, src_insts, len(self.gold), opt.batch_size))
+        check_chain = not opt.no_check_chain
+        self.translator = Translator.from_model(
+            model, opt, argparse.Namespace(decode_steps=opt.decode_steps, check_chain=check_chain), device)
+        self.chain = ChainFormatter(opt.model_type, data['dict']['tgt'], check_chain)
+        self.model, self.opt = model, opt
+        self.n_attributes = max(len(chain.split()) for chain in self.gold)
+
+    def __call__(self):
+        self.model.eval()
+        lines = [None] * len(self.gold)
+        for indices, image, src, _ in tqdm(self.loader, mininterval=1, desc='Predicting', leave=False):
+            if self.opt.model_type == 'sequential':
+                predictions, _ = self.translator.translate_batch(image, src)
+            else:
+                predictions = self.translator.translate_batch(image, src, getattr(self.opt, 'tgt_vocab_sizes', None))
+            for i, prediction in zip(indices, predictions):
+                lines[i] = self.chain(prediction)
+        _, errors_all = attribute_errors(self.gold, lines, self.n_attributes)
+        return 1.0 - float(errors_all) / len(self.gold)
+
+
+def train(model, training_data, validation_data, crit, optimizer, opt, chain_accuracy=None):
     ''' Start training '''
     log_train_file = None
     log_valid_file = None
@@ -127,14 +189,15 @@ def train(model, training_data, validation_data, crit, optimizer, opt):
         log_valid_file = opt.log + '.valid.log'
         print('[Info] Training performance will be written to file: {}'.format(log_train_file))
         print('[Info] Validation performance will be written to file: {}'.format(log_valid_file))
-        header = 'epoch,loss\n' if opt.model_type == 'multilabel' else 'epoch,loss,ppl,accuracy\n'
-        for log_file in (log_train_file, log_valid_file):
-            with open(log_file, 'w') as f:
-                f.write(header)
+        header = 'epoch,loss' if opt.model_type == 'multilabel' else 'epoch,loss,ppl,accuracy'
+        with open(log_train_file, 'w') as f:
+            f.write(header + '\n')
+        with open(log_valid_file, 'w') as f:
+            f.write(header + (',chain_accuracy' if chain_accuracy else '') + '\n')
     if opt.save_model and not os.path.isdir(opt.save_model):
         os.makedirs(opt.save_model)
 
-    best = None  # the best validation accuracy; the lowest validation loss for the multilabel model
+    best = None  # the best validation result (see -select_by)
     epochs_without_improvement = 0
     for epoch_i in range(opt.epoch):
         print('[ Epoch', epoch_i, ']')
@@ -146,8 +209,17 @@ def train(model, training_data, validation_data, crit, optimizer, opt):
         start = time.time()
         valid_loss, valid_accu = eval_epoch(model, validation_data, crit, opt)
         print(performance_line('Validation', valid_loss, valid_accu, start, opt))
+        valid_chain_accuracy = None
+        if chain_accuracy:
+            start = time.time()
+            valid_chain_accuracy = chain_accuracy()
+            print('  - (Validation)   full-chain accuracy of the predictions: {:3.3f} %, elapse: {:3.3f} min'.format(
+                100 * valid_chain_accuracy, (time.time() - start) / 60))
 
-        score = -float(valid_loss) if opt.model_type == 'multilabel' else float(valid_accu)
+        if opt.select_by == 'chain_accuracy':
+            score = valid_chain_accuracy
+        else:
+            score = -float(valid_loss) if opt.model_type == 'multilabel' else float(valid_accu)
         improved = best is None or score >= best
         if improved:
             best = score
@@ -159,6 +231,8 @@ def train(model, training_data, validation_data, crit, optimizer, opt):
         if opt.save_model:
             if opt.save_mode == 'all':
                 torch.save(checkpoint, os.path.join(opt.save_model, "model." + str(epoch_i) + ".chkpt"))
+            elif opt.save_mode == 'last':
+                torch.save(checkpoint, os.path.join(opt.save_model, 'model.last.chkpt'))
             elif improved:
                 torch.save(checkpoint, os.path.join(opt.save_model, 'model.best.chkpt'))
                 print('    - [Info] The checkpoint file has been updated.')
@@ -167,7 +241,7 @@ def train(model, training_data, validation_data, crit, optimizer, opt):
             with open(log_train_file, 'a') as log_tf:
                 log_tf.write(log_line(epoch_i, train_loss, train_accu, opt))
             with open(log_valid_file, 'a') as log_vf:
-                log_vf.write(log_line(epoch_i, valid_loss, valid_accu, opt))
+                log_vf.write(log_line(epoch_i, valid_loss, valid_accu, opt, valid_chain_accuracy))
 
         if opt.patience and epochs_without_improvement >= opt.patience:
             print('[Info] No improvement on the validation set for {} epochs; stopping.'.format(opt.patience))
@@ -201,15 +275,37 @@ def main():
     parser.add_argument('-unused_slf_attention', action='store_true',
                         help='add the attention module that the Rakuten text+image Self-Attentive '
                              'MultiTask model had but did not use')
+    parser.add_argument('-mask_padding', action='store_true',
+                        help='the baselines leave out the padding of the titles in the average pooling and in '
+                             'the attention, as the attention of the sequential model does (the original code '
+                             'included it)')
+    parser.add_argument('-frozen_resnet', action='store_true',
+                        help='keep the pretrained ResNet in evaluation mode during training, so that its '
+                             'BatchNorm layers keep the ImageNet statistics and the whole ResNet stays as '
+                             'pretrained (the original code updated these statistics)')
+    parser.add_argument('-label_smoothing', type=float, default=0.0,
+                        help='label smoothing of the loss, e.g. 0.1: the paper cites the regularization of '
+                             'Vaswani et al., which includes it, but the code of its runs did not apply it')
 
     parser.add_argument('-log', default=None)
     parser.add_argument('-save_model', default=None, help='the directory for the checkpoints')
-    parser.add_argument('-save_mode', type=str, choices=['all', 'best'], default='best',
+    parser.add_argument('-save_mode', type=str, choices=['all', 'best', 'last'], default='best',
                         help='all: models/model.<epoch>.chkpt after every epoch; best: models/model.best.chkpt '
-                             'whenever the validation accuracy (multilabel: loss) is the best so far')
+                             'whenever the validation result (-select_by) is the best so far; last: '
+                             'models/model.last.chkpt after every epoch (the Amazon models of the paper)')
     parser.add_argument('-patience', type=int, default=0,
                         help='stop when the validation result has not improved for this many epochs '
                              '(0: train for -epoch epochs)')
+    parser.add_argument('-select_by', choices=['model_metric', 'chain_accuracy'], default='model_metric',
+                        help='the validation result of -save_mode best and -patience. model_metric, as in the '
+                             'paper\'s runs: the accuracy of the training targets (of the tokens for the '
+                             'sequential model, the attributes for the multitask models, the chains for '
+                             'multiclass), the loss for multilabel. chain_accuracy: the full-chain accuracy of '
+                             'the predicted validation chains, the same for all models (Rakuten, Kaggle)')
+    parser.add_argument('-decode_steps', type=int, default=8,
+                        help='-select_by chain_accuracy, sequential model: as translate.py -decode_steps')
+    parser.add_argument('-no_check_chain', action='store_true',
+                        help='-select_by chain_accuracy, sequential model: as translate.py -no_check_chain')
     parser.add_argument('-pretrained', type=str, default="", help='a checkpoint to continue from')
 
     parser.add_argument('-no_cuda', action='store_true')
@@ -237,6 +333,8 @@ def main():
     kaggle.add_argument('-test_size', type=float, default=5000, help='products in the test set; likewise')
     kaggle.add_argument('-sp_vocab_size', type=int, default=4000,
                         help='pieces of the SentencePiece model of the training titles')
+    kaggle.add_argument('-distinct_unk', action='store_true',
+                        help='the token vocabularies start the tokens at index 4 (build_vocab.py -distinct_unk)')
 
     opt = parser.parse_args()
     if (opt.data is None) == (opt.kaggle_dir is None):
@@ -265,7 +363,7 @@ def main():
     #========= Loading Dataset =========#
     if opt.kaggle_dir:
         opt.data = kaggle_data.prepare(opt.kaggle_dir, opt.kaggle_data_dir, opt.model_type, opt.seed,
-                                       opt.valid_size, opt.test_size, opt.sp_vocab_size)
+                                       opt.valid_size, opt.test_size, opt.sp_vocab_size, opt.distinct_unk)
     data = compat.torch_load(opt.data)
     opt.max_token_seq_len = data['settings'].max_token_seq_len
     has_image, has_text = 'img' in data['train'], 'src' in data['train']
@@ -276,6 +374,8 @@ def main():
                                                      else 'text'))
     if uses_image(opt.modality) and not opt.image_dir:
         parser.error('the image models need -image_dir')
+    if opt.select_by == 'chain_accuracy' and 'chains' not in data['valid']:
+        parser.error('-select_by chain_accuracy needs the validation chains in data.pt: run preprocess.py again')
     tgt_format = TGT_FORMATS[opt.model_type]
     tgt_dict = data['dict']['tgt']
 
@@ -352,7 +452,12 @@ def main():
         model = model.cuda()
         crit = [c.cuda() for c in crit] if isinstance(crit, list) else crit.cuda()
 
-    train(model, training_data, validation_data, crit, optimizer, opt)
+    chain_accuracy = None
+    if opt.select_by == 'chain_accuracy':
+        device = torch.device('cuda' if opt.cuda else 'cpu')
+        chain_accuracy = ChainAccuracy(model, data, valid_transform, opt, device)
+
+    train(model, training_data, validation_data, crit, optimizer, opt, chain_accuracy)
 
 
 if __name__ == '__main__':

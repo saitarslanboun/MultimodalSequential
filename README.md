@@ -24,8 +24,9 @@ implements all models; the settings of each experiment are in a file in `experim
 ├── DataLoader.py     batches of images, titles and attribute chains
 ├── kaggle_data.py    splits the Kaggle data with a seed and prepares it (train.py -kaggle_dir)
 ├── rnmtplus/         the models (Models.py), prediction (Translator.py), RNMT+ layers and attention
-├── experiments/      the settings of the 42 experiments: <dataset>/<input>/<model>.json, and in
-│                     kaggle_seeded/ those of the Kaggle experiments on a split drawn with a seed
+├── experiments/      the settings of the 42 experiments: <dataset>/<input>/<model>.json;
+│                     <dataset>_fixed/: the same with the fixes for a fair comparison;
+│                     kaggle_seeded/: the Kaggle experiments on a split drawn with a seed, with these fixes
 ├── analysis/         the analysis scripts of the paper
 └── tests/            smoke_test.py: an end-to-end run of every experiment on synthetic data;
                       reproducibility_test.py: the same seed gives the same results
@@ -148,12 +149,51 @@ Then it trains with the same seed:
 
 `translate` uses the seed of the checkpoint.
 
-The validation and test images are resized (shorter side 256) and center-cropped to 224 × 224, without
-randomness; the training images keep the random resized crop and flip of the paper's runs. Training stops when
-the validation result has not improved for three epochs and keeps the best checkpoint. Runs with the same seed
+The settings use the fixes of the next section. The validation and test images are resized (shorter side 256)
+and center-cropped to 224 × 224, without randomness; the training images keep the random resized crop and flip
+of the paper's runs. Training stops when the full-chain accuracy of the predicted validation chains has not
+improved for three epochs and keeps the best checkpoint. Runs with the same seed
 on the same type of GPU and the same software versions give the same files, weights, logs and predictions;
 another GPU type or other versions of PyTorch, Pillow or SentencePiece can give other numbers. The five
 products of the Kaggle data without an image get a blank image, as in the paper's runs.
+
+## Settings for a fair comparison
+
+The settings in `experiments/<dataset>/` reproduce the paper's runs, with training details that differ between
+the models or from the description of the paper (Section 4.4). The settings in `experiments/<dataset>_fixed/`
+(the paper's splits of Rakuten, Kaggle and Amazon) and in `experiments/kaggle_seeded/` train all the models of a
+dataset in the same way, as the paper describes, without changing the models:
+
+| Training detail | The paper's runs | The fixed settings | Option |
+|---|---|---|---|
+| Training crop | `RandomCrop` for some Rakuten and Amazon models, `RandomResizedCrop` for the others | the random resized crop and flip that the paper describes, for all | `-train_crop random_resized_crop` |
+| Validation and test images | random crop and flip | resized and center-cropped, without randomness | `-valid_crop` and `-test_crop center_crop` |
+| Model selection and early stopping | the accuracy of the training targets of each model (tokens given the gold previous ones, attributes or chains), the loss for Binary MultiLabel | the full-chain accuracy of the predicted validation chains, for all models | `-select_by chain_accuracy` |
+| Pretrained ResNet | its BatchNorm statistics are updated in training | entirely frozen, as the paper describes | `-frozen_resnet` |
+| Title padding in the baselines | part of the average pooling and of the attention | left out, as in the attention of the Sequential model | `-mask_padding` |
+| Regularization of Vaswani et al. | dropout 0.1 | dropout 0.1 and label smoothing 0.1 | `-label_smoothing 0.1` |
+| Amazon epochs | the checkpoint of the 8th epoch (`model.7.chkpt`) | 7 epochs and the last model, as the paper describes | `-epoch 7 -save_mode last` |
+| Token vocabularies | the most frequent token shares the index of `<UNK>` | every token has its own index | `build_vocab.py -distinct_unk` |
+
+The architecture, the optimizer, the learning rate schedule, the batch size and the early stopping after three
+epochs without improvement are those of the paper in all settings, and every dataset uses the vocabularies of
+its own training data. The paper reports one run per model; to compare the models, run each with several seeds
+and report the mean and standard deviation of the error rates:
+
+```bash
+S=experiments/rakuten_fixed/txt+img/sequential.json
+for seed in 1 2 3; do
+  W=work/rakuten_fixed/txt+img/sequential/seed$seed
+  python run.py $S vocab      -data_dir $D -work_dir $W
+  python run.py $S preprocess -data_dir $D -work_dir $W
+  python run.py $S train      -data_dir $D -work_dir $W -image_dir $I -seed $seed
+  python run.py $S translate  -data_dir $D -work_dir $W -image_dir $I   # with $W/models/model.best.chkpt
+done
+python analysis/seed_summary.py -n_attributes 7 -gold $D/test.lbl work/rakuten_fixed/txt+img/sequential/seed*
+```
+
+With `experiments/kaggle_seeded/`, every seed also draws its own split: `analysis/seed_summary.py -n_attributes 8
+WORK ...` reads the test set of each run from `WORK/data/test.lbl`.
 
 ## Data
 
@@ -184,6 +224,7 @@ counts as correct if it equals any of them.
 | Heat maps of the image attention of the Sequential model (`translate.py -save_attention`) | `analysis/visualize_heatmap.py` |
 | Chain frequencies, attribute transitions, chain lengths | `analysis/label_stats.py` |
 | The best epoch in a training log | `analysis/best_epoch.py` |
+| The mean and standard deviation of the error rates of runs with different seeds | `analysis/seed_summary.py` |
 
 ## Differences from the code of the paper's runs
 
@@ -225,7 +266,8 @@ Sequential: 493 s → 60 s).
 - `build_vocab.py` sorts by frequency as NumPy 1.x did; NumPy 2 orders equal frequencies differently, which
   would give words other indices.
 
-**Kept from the original code, although they affect the results**
+**Kept from the original code, although they affect the results** (the settings in `experiments/<dataset>_fixed/`
+and `experiments/kaggle_seeded/` change them: see [Settings for a fair comparison](#settings-for-a-fair-comparison))
 
 - The random crop of the images (`RandomCrop` or `RandomResizedCrop`, as in each experiment) and the random
   flip are applied in validation and prediction too, so the predictions of the image models depend on the
@@ -239,7 +281,9 @@ Sequential: 493 s → 60 s).
 
 - Every run is seeded (see [Running an experiment](#running-an-experiment)); the original code drew its
   random numbers without a seed.
-
+- The settings of the Kaggle text+image baselines build the title vocabulary from the SentencePiece-encoded
+  titles that the models read (`train.enc.tit.json`), as the other Kaggle settings do; the scripts of the
+  paper's runs used another vocabulary file, `train.tit.json`.
 - The Rakuten text+image Sequential model trains; its copy failed with "too many values to unpack".
 - `evaluate.py` divides by the number of products instead of 5,000, and stops if a prediction file is shorter
   than the gold file.
@@ -277,6 +321,13 @@ Sequential: 493 s → 60 s).
   give identical weights, logs and predictions, the predictions also with another number of processes loading
   the images; with the same seed, the training is that of the code before every run was seeded (10 settings).
   The scripts run with `PYTHONHASHSEED` set to the seed.
+- **Settings for a fair comparison**: on both stacks, `tests/smoke_test.py` passes for all 102 settings files and
+  `tests/reproducibility_test.py` for the 18 seeded Kaggle settings with the fixes. With `-mask_padding`, a
+  title gets the same outputs with and without padding in its batch. With `-select_by chain_accuracy`, the full-
+  chain accuracy logged in training is that of `evaluate.py` for the validation predictions of `translate.py`
+  with the kept checkpoint (also on the real Kaggle data). With `-frozen_resnet`, the BatchNorm layers keep the
+  ImageNet statistics. With the default options, the results are those of the code before these options (10
+  settings).
 
 ## Requirements
 

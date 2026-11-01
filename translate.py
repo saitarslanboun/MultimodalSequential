@@ -2,35 +2,15 @@
 
 import argparse
 import os
-from collections import OrderedDict
 
 import torch
 from tqdm import tqdm
 
-import rnmtplus.Constants as Constants
 from DataLoader import CROPS, DataLoader, PredictionSeededTransform, image_transform
 from preprocess import convert_instance_to_idx_seq, read_instances_from_file
 from rnmtplus import compat
 from rnmtplus.Models import MODEL_TYPES, uses_image, uses_text
-from rnmtplus.Translator import Translator
-
-
-def make_batches(model_type, src_insts, n_insts, batch_size):
-    ''' The batches (lists of product indices) for prediction.
-
-    The multiclass and multilabel models predicted in consecutive slices of -batch_size in the original
-    code. The titles of a batch are padded, and the padding positions take part in the average pooling of the
-    text encodings, so these batches are kept. The other models predicted one product at a time; here the
-    products whose titles have the same length are batched together, which needs no padding. '''
-    if model_type in ('multiclass', 'multilabel') or src_insts is None:
-        return [list(range(i, min(i + batch_size, n_insts))) for i in range(0, n_insts, batch_size)]
-    by_length = OrderedDict()
-    for i, inst in enumerate(src_insts):
-        by_length.setdefault(len(inst), []).append(i)
-    batches = []
-    for indices in by_length.values():
-        batches.extend(indices[j:j + batch_size] for j in range(0, len(indices), batch_size))
-    return batches
+from rnmtplus.Translator import ChainFormatter, Translator, make_batches
 
 
 def main():
@@ -120,26 +100,9 @@ def main():
         src_insts=test_src_insts, cuda=opt.cuda, shuffle=False, num_workers=opt.num_workers, seed=seed,
         batches=make_batches(model_type, test_src_insts, n_insts, opt.batch_size))
 
-    if model_type in ('sequential', 'multiclass'):
-        inv_map = {v: k for k, v in tgt_dict.items()}
-    else:
-        inv_maps = [{v: k for k, v in tgt_dict[str(a)].items()} for a in range(len(tgt_dict.keys()))]
+    chain = ChainFormatter(model_type, tgt_dict, opt.check_chain)
+    if model_type not in ('sequential', 'multiclass'):
         vocab_sizes = [len(tgt_dict[str(a)]) for a in range(len(tgt_dict.keys()))]
-
-    def chain(prediction):
-        if model_type == 'sequential':
-            if prediction is None:
-                return "None"
-            if opt.check_chain:
-                seq = prediction[1:-1]
-            elif Constants.EOS in prediction:
-                seq = prediction[1:prediction.index(Constants.EOS)]
-            else:
-                seq = prediction[1:]
-            return " ".join(inv_map[val] for val in seq)
-        if model_type == 'multiclass':
-            return inv_map[prediction]
-        return " ".join(inv_maps[a][val] for a, val in enumerate(prediction))
 
     if opt.save_attention and not os.path.isdir(opt.save_attention):
         os.makedirs(opt.save_attention)
