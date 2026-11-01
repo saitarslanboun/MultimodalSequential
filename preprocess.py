@@ -104,7 +104,7 @@ def load_json(path):
         return json.load(f)
 
 
-def main():
+def main(argv=None):
     ''' Main function '''
     parser = argparse.ArgumentParser(description='preprocess.py')
     parser.add_argument('-model_type', required=True, choices=MODEL_TYPES)
@@ -119,7 +119,7 @@ def main():
     parser.add_argument('-save_data', required=True)
     parser.add_argument('-max_len', '--max_word_seq_len', type=int, default=1000)
 
-    opt = parser.parse_args()
+    opt = parser.parse_args(argv)
     opt.max_token_seq_len = opt.max_word_seq_len + 2
     tgt_format = TGT_FORMATS[opt.model_type]
     image = opt.train_img is not None

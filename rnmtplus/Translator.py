@@ -11,12 +11,13 @@ from rnmtplus.Models import architecture_from_state_dict, build_model
 class Translator(object):
     ''' Loads a checkpoint (a file models/model.<epoch>.chkpt written by train.py) for prediction. '''
 
-    def __init__(self, opt):
+    def __init__(self, opt, checkpoint=None):
         ''' opt: the options of translate.py. opt.model_type is only used for checkpoints of the original
-        experiment code, which do not record the model type. '''
+        experiment code, which do not record the model type. checkpoint: opt.model, if already loaded. '''
         self.opt = opt
         self.device = torch.device('cuda' if opt.cuda else 'cpu')
-        checkpoint = compat.torch_load(opt.model, map_location='cpu')
+        if checkpoint is None:
+            checkpoint = compat.torch_load(opt.model, map_location='cpu')
         model_opt = checkpoint['settings']
         architecture = architecture_from_state_dict(checkpoint['model'])
         if getattr(model_opt, 'model_type', None) is None:
