@@ -3,6 +3,13 @@
   "based_on": "experiments/kaggle/txt/multitask_att.json",
   "model_type": "multitask_att",
   "modality": "txt",
+  "missing_values": [
+    "NA",
+    "None"
+  ],
+  "exclude_ids": [
+    "28319"
+  ],
   "vocab": {
     "distinct_unk": true
   },

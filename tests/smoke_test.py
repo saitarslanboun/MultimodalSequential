@@ -29,13 +29,14 @@ ATTRIBUTES = {
     'rakuten': [['Male', 'Female'], ['Upper', 'Lower'], ['Topwear', 'Dresses'], ['Top', 'Coat', 'Skirt'],
                 ['Shirt', 'Blouse', 'Anorak'], ['Slim', 'Regular'], ['Normal', 'Stretchy']],
     'kaggle': [['Men', 'Women'], ['Apparel', 'Footwear'], ['Topwear', 'Shoes'], ['Tshirts', 'Shirts', 'Casual_Shoes'],
-               ['Navy_Blue', 'Black', 'White'], ['Summer', 'Winter'], ['2011', '2012'], ['Casual', 'Formal']]}
+               ['Navy_Blue', 'Black', 'White'], ['Summer', 'Winter', 'None'], ['2011', '2012'],
+               ['Casual', 'Formal', 'NA']]}  # NA, None: the missing values of the Kaggle data
 AMAZON = [['Clothing', 'Women', 'Dresses'], ['Clothing', 'Men', 'Shirts', 'Casual'], ['Shoes', 'Women', 'Sandals'],
           ['Jewelry', 'Rings'], ['Clothing', 'Girls', 'Dresses'], ['Shoes', 'Men', 'Boots', 'Leather']]
 SIZES = {'train': 24, 'valid': 8, 'test': 8}
 KAGGLE_VALUES = [['Men', 'Women', 'Unisex'], ['Apparel', 'Footwear'], ['Topwear', 'Shoes'],
                  ['Tshirts', 'Casual Shoes', 'Shirts'], ['Navy Blue', 'Black', 'White'], ['Summer', 'Winter', ''],
-                 ['2011', '2012'], ['Casual', 'Formal']]
+                 ['2011', '2012'], ['Casual', 'Formal', 'NA']]
 # For the settings in experiments/kaggle_seeded: the split sizes and a SentencePiece model for the small data.
 KAGGLE_OPTIONS = ['-seed', '1', '-valid_size', str(SIZES['valid']), '-test_size', str(SIZES['test']),
                   '-sp_vocab_size', '40']

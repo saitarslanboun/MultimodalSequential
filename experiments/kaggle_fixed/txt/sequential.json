@@ -3,6 +3,13 @@
   "based_on": "experiments/kaggle/txt/sequential.json",
   "model_type": "sequential",
   "modality": "txt",
+  "missing_values": [
+    "NA",
+    "None"
+  ],
+  "exclude_ids": [
+    "28319"
+  ],
   "vocab": {
     "distinct_unk": true
   },

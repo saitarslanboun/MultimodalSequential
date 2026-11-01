@@ -3,6 +3,13 @@
   "based_on": "experiments/kaggle/img/multilabel.json",
   "model_type": "multilabel",
   "modality": "img",
+  "missing_values": [
+    "NA",
+    "None"
+  ],
+  "exclude_ids": [
+    "28319"
+  ],
   "vocab": {
     "distinct_unk": true
   },

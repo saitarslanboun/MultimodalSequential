@@ -4,7 +4,9 @@ The targets depend on the model:
 - sequential: the attribute chain as a token sequence <BOS> value ... value <EOS>,
 - multiclass: the index of the whole chain in the class vocabulary,
 - multilabel and the multitask models: one index per attribute, from one vocabulary per attribute.
-The vocabularies are built with build_vocab.py.
+The vocabularies are built with build_vocab.py. With -missing_values (the Kaggle data: NA,None), a target value
+that marks a missing attribute becomes -1 (Constants.MISSING), which the losses ignore; for multiclass, a chain
+with a missing value becomes -1.
 '''
 
 import argparse
@@ -14,6 +16,7 @@ import sys
 
 import torch
 
+import rnmtplus.Constants as Constants
 from rnmtplus.Models import MODEL_TYPES
 
 TGT_FORMATS = {'sequential': 'sequence', 'multiclass': 'chain', 'multilabel': 'attributes',
@@ -26,13 +29,16 @@ def read_lines(inst_file):
         return f.read().splitlines(True)
 
 
-def convert_instance_to_idx_seq(word_insts, word2idx):
-    ''' Mapping words to idx sequence; unknown words become <UNK>. '''
+def convert_instance_to_idx_seq(word_insts, word2idx, missing=()):
+    ''' Mapping words to idx sequence; unknown words become <UNK>, the values of missing (missing attributes)
+    Constants.MISSING. '''
     idx_seqs = []
     for inst in word_insts:
         idx_seq = []
         for token in inst:
-            if token in word2idx:
+            if token in missing:
+                idx_seq.append(Constants.MISSING)
+            elif token in word2idx:
                 idx_seq.append(word2idx[token])
             else:
                 idx_seq.append(word2idx['<UNK>'])
@@ -40,18 +46,23 @@ def convert_instance_to_idx_seq(word_insts, word2idx):
     return idx_seqs
 
 
-def convert_target_instance_to_idx(line_insts, line2idx):
-    ''' Mapping lines (whole attribute chains) to their class index; unknown chains become <UNK>. '''
+def convert_target_instance_to_idx(line_insts, line2idx, missing=()):
+    ''' Mapping lines (whole attribute chains) to their class index; unknown chains become <UNK>, chains with
+    a value of missing Constants.MISSING. '''
     idx = []
     for inst in line_insts:
         chain = inst.strip()
-        idx.append(line2idx[chain] if chain in line2idx else line2idx['<UNK>'])
+        if missing and any(value in missing for value in chain.split()):
+            idx.append(Constants.MISSING)
+        else:
+            idx.append(line2idx[chain] if chain in line2idx else line2idx['<UNK>'])
     return idx
 
 
-def convert_target_instance_to_attribute_idx(line_insts, line2idx):
+def convert_target_instance_to_attribute_idx(line_insts, line2idx, missing=()):
     ''' Mapping lines to one index per attribute, from the vocabulary of each attribute (line2idx['0'],
-    line2idx['1'], ...); unknown values become <UNK>. Returns one list per attribute. '''
+    line2idx['1'], ...); unknown values become <UNK>, the values of missing Constants.MISSING. Returns one list
+    per attribute. '''
     idx = []
     for inst in line_insts:
         tokens = inst.strip().split()
@@ -60,7 +71,10 @@ def convert_target_instance_to_attribute_idx(line_insts, line2idx):
                 idx.append([])
         for a in range(len(tokens)):
             vocab = line2idx[str(a)]
-            idx[a].append(vocab[tokens[a]] if tokens[a] in vocab else vocab['<UNK>'])
+            if tokens[a] in missing:
+                idx[a].append(Constants.MISSING)
+            else:
+                idx[a].append(vocab[tokens[a]] if tokens[a] in vocab else vocab['<UNK>'])
     return idx
 
 
@@ -117,10 +131,14 @@ def main(argv=None):
     parser.add_argument('-src_vocab', help='title vocabulary (text models)')
     parser.add_argument('-tgt_vocab', required=True)
     parser.add_argument('-save_data', required=True)
+    parser.add_argument('-missing_values', default='', metavar='VALUES',
+                        help='comma-separated target values that mark a missing attribute, e.g. NA,None: they '
+                             'become -1, which the losses ignore')
     parser.add_argument('-max_len', '--max_word_seq_len', type=int, default=1000)
 
     opt = parser.parse_args(argv)
     opt.max_token_seq_len = opt.max_word_seq_len + 2
+    missing = frozenset(v for v in opt.missing_values.split(',') if v)
     tgt_format = TGT_FORMATS[opt.model_type]
     image = opt.train_img is not None
     text = opt.train_src is not None
@@ -163,8 +181,8 @@ def main(argv=None):
         print('[Info] Convert target line instances into line index.')
         convert = convert_target_instance_to_idx if tgt_format == 'chain' else \
             convert_target_instance_to_attribute_idx
-    train_tgt_insts = convert(train_tgt_insts, tgt_word2idx)
-    valid_tgt_insts = convert(valid_tgt_insts, tgt_word2idx)
+    train_tgt_insts = convert(train_tgt_insts, tgt_word2idx, missing)
+    valid_tgt_insts = convert(valid_tgt_insts, tgt_word2idx, missing)
 
     # The attribute chains of the validation set as text, for train.py -select_by chain_accuracy.
     with io.open(opt.valid_tgt, encoding='utf-8') as f:
