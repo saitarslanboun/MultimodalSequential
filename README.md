@@ -6,97 +6,95 @@ Code for
 > **Multimodal Sequential Fashion Attribute Prediction.** *Information* 2019, 10(10), 308.
 > https://doi.org/10.3390/info10100308
 
-The repository contains the proposed Sequential model and the code of every experiment reported in the
-paper: the Sequential model and all baselines (MultiClass, Binary MultiLabel, MultiTask, Attentive MultiTask,
-Self-Attentive MultiTask) on the Rakuten, Kaggle and Amazon datasets, with text-only, image-only and
-text+image input.
+The repository contains the code of every experiment in the paper: the proposed Sequential model and the
+baselines (MultiClass, Binary MultiLabel, MultiTask, Attentive MultiTask, Self-Attentive MultiTask) on the
+Rakuten, Kaggle and Amazon datasets, with text-only, image-only and text+image input. One code base
+implements all models; the settings of each experiment are in a file in `experiments/`.
 
 ## Repository layout
 
 ```
 .
-├── train.py, translate.py, preprocess.py, DataLoader.py, rnmtplus/
-│                      Sequential model as originally released (Rakuten, text+image)
-└── experiments/       code of all 42 experiments in the paper
-    ├── RakutenDatasetExperiments/{TXT,IMG,TXT+IMG}/<model>/
-    ├── KaggleDatasetExperiments/{TXT,IMG,TXT+IMG}/<model>/
-    │   └── error_analysis/
-    └── AmazonDatasetExperiments/{TXT,IMG,TXT+IMG}/{MultiClass,EncoderDecoder}/
+├── run.py            runs a stage of an experiment with the settings in its file
+├── build_vocab.py    builds the vocabularies
+├── preprocess.py     converts the data files into data.pt
+├── train.py          trains a model
+├── translate.py      predicts attribute chains with a trained model
+├── evaluate.py       computes the error rates of the predictions
+├── DataLoader.py     batches of images, titles and attribute chains
+├── rnmtplus/         the models (Models.py), prediction (Translator.py), RNMT+ layers and attention
+├── experiments/      the settings of the 42 experiments: <dataset>/<input>/<model>.json
+├── analysis/         the analysis scripts of the paper
+└── tests/            smoke_test.py: an end-to-end run of every experiment on synthetic data
 ```
-
-`TXT` = text-only, `IMG` = image-only, `TXT+IMG` = multimodal input.
-
-The folders under `experiments/` are the original experiment folders with data, checkpoints, logs and
-predictions removed; the code in them is unchanged. The root-level code is
-`experiments/RakutenDatasetExperiments/TXT+IMG/EncoderDecoder/model/` without docstrings and an unused
-`validate()` method, and with the fix described under [Known issue](#known-issue).
 
 ## Models
 
-| Paper (section) | Folder | Output layer |
+| Paper (section) | `model_type` | Output layer |
 |---|---|---|
-| MultiClass (4.3.1) | `MultiClass` | one softmax over all attribute chains seen in training |
-| Binary MultiLabel (4.3.2) | `MultiLabel` | one sigmoid per attribute value (BCE loss); highest-scoring value per attribute at test time |
-| MultiTask (4.3.2) | `MultiLabelMultiClass` | one softmax classifier per attribute |
-| Attentive MultiTask (4.3.2) | `MultiLabelMultiClass_Att` | MultiTask + per-attribute multi-head attention over the image and text features (Eq. 7) |
-| Self-Attentive MultiTask (4.3.2) | `MultiLabelMultiClass_SlfAtt` | Attentive MultiTask + the attribute representations added to the attended keys and values (Eq. 8) |
-| Sequential (3) | `EncoderDecoder` | RNMT+ decoder that generates the chain one attribute at a time |
+| MultiClass (4.3.1) | `multiclass` | one softmax over all attribute chains seen in training |
+| Binary MultiLabel (4.3.2) | `multilabel` | one sigmoid per attribute value (BCE loss); highest-scoring value per attribute at test time |
+| MultiTask (4.3.2) | `multitask` | one softmax classifier per attribute |
+| Attentive MultiTask (4.3.2) | `multitask_att` | MultiTask + per-attribute multi-head attention over the image and text features (Eq. 7) |
+| Self-Attentive MultiTask (4.3.2) | `multitask_slfatt` | Attentive MultiTask + the attribute representations added to the attended keys and values (Eq. 8) |
+| Sequential (3) | `sequential` | RNMT+ decoder that generates the chain one attribute at a time |
 
-All models use the same encoders (Section 3.1): ResNet-50 features for the image and the RNMT+ GRU encoder
-for the title. The baselines average-pool and concatenate the two encodings (Section 4.3).
+All models use the same encoders (Section 3.1): ResNet-50 features for the image (`img`) and the RNMT+ GRU
+encoder for the title (`txt`). The baselines average-pool and concatenate the two encodings (Section 4.3).
 
 ## Experiments and paper tables
 
 | Dataset | Models | Input |
 |---|---|---|
-| Rakuten | all six | `TXT`, `IMG`, `TXT+IMG` |
-| Kaggle | all six | `TXT`, `IMG`, `TXT+IMG` |
-| Amazon | `MultiClass`, `EncoderDecoder` (the category structure is unknown, Section 5) | `TXT`, `IMG`, `TXT+IMG` |
+| Rakuten | all six | `txt`, `img`, `txt+img` |
+| Kaggle | all six | `txt`, `img`, `txt+img` |
+| Amazon | `multiclass`, `sequential` (the category structure is unknown, Section 5) | `txt`, `img`, `txt+img` |
 
-- `TXT+IMG` folders: Table 2 (full-chain accuracy) and Tables 3–4 (per-attribute accuracy).
-- `TXT` and `IMG` folders: Tables 6 and 7. The paper reports MultiClass, Attentive MultiTask and Sequential
-  for these settings; the folders contain all six models.
-- Table 5 (seen vs. unseen attribute chains on Kaggle): see [Analysis scripts](#analysis-scripts).
+- `txt+img`: Table 2 (full-chain accuracy) and Tables 3–4 (per-attribute accuracy).
+- `txt` and `img`: Tables 6 and 7. The paper reports MultiClass, Attentive MultiTask and Sequential for these
+  settings; the settings files exist for all six models.
+- Table 5 (seen vs. unseen attribute chains on Kaggle): `analysis/seen_unseen.py`.
+
+A settings file, for example `experiments/kaggle/txt+img/multitask_att.json`, holds the data files and the
+options of the scripts that were used for the experiment, the folder of the original experiment code
+(`experiment`), and the checkpoint the paper's test results were computed with (`paper_checkpoint`).
 
 ## Running an experiment
 
-Every experiment folder has the same structure:
-
+```bash
+S=experiments/kaggle/txt+img/multitask_att.json
+D=/data/kaggle          # the data files: train.img, train.enc.tit, train.lbl, ... (see Data)
+I=/data/kaggle/images
+W=work/kaggle/txt+img/multitask_att
+python run.py $S vocab      -data_dir $D -work_dir $W   # vocabularies -> $W/*.json
+python run.py $S preprocess -data_dir $D -work_dir $W   # -> $W/data.pt
+python run.py $S train      -data_dir $D -work_dir $W -image_dir $I
+python run.py $S translate  -data_dir $D -work_dir $W -image_dir $I -split valid -checkpoint $W/models/model.9.chkpt
+python run.py $S evaluate   -data_dir $D -work_dir $W -split valid
 ```
-<model>/
-├── dataset/   vocabulary builders and small dataset-statistics helpers; the data files go here
-├── model/     model code: train.py, translate.py, DataLoader.py, preprocess.py, rnmtplus/
-└── work/      preprocess.sh, train.sh, translate.sh, translate_test.sh, validate.py, test.py
-```
 
-1. Put the data files (see [Data](#data)) into `dataset/` and build the vocabularies there:
-   `python build_dictionary.py <file>` writes `<file>.json`, a token vocabulary (used for titles and for
-   the Sequential model's labels); `python build_att_dictionary.py train.lbl` writes the label vocabulary
-   of the baselines (MultiClass: one class per full chain; multilabel models: one vocabulary per attribute).
-   `work/preprocess.sh` shows which files each experiment uses.
-2. Set `-image_dir` in `work/*.sh` to your image folder. The scripts still contain the paths on the
-   authors' cluster.
-3. Run everything from `work/`; the scripts use paths relative to it:
+`run.py` builds the command line of the stage script from the settings file and prints it; `-dry_run` only
+prints it, so the scripts can also be run directly. Options after the stage are passed on to the script and
+override the settings file. `-split test` (the default) predicts and evaluates the test set
+(`$W/pred_test.txt`); `-split valid` the validation set (`$W/pred.txt`).
+
+As in the paper's runs, `train` trains for up to 500 epochs and saves a checkpoint after every epoch
+(`$W/models/model.<epoch>.chkpt`, `-save_mode all`); the logs are `$W/log.train.log` and
+`$W/log.valid.log`. In the paper, training on Rakuten and Kaggle was stopped when the validation accuracy had
+not improved for three epochs, and the Amazon models were trained for a fixed number of epochs (Section 4.4).
+To stop automatically and keep only the best checkpoint, `$W/models/model.best.chkpt`:
 
 ```bash
-cd experiments/KaggleDatasetExperiments/TXT+IMG/MultiLabelMultiClass_Att/work
-bash preprocess.sh       # data files + vocabularies -> ../dataset/data.pt
-mkdir -p models          # train.py does not create it
-bash train.sh            # writes models/model.<epoch>.chkpt and log.{train,valid}.log every epoch
-bash translate.sh        # dev predictions  -> pred.txt
-bash translate_test.sh   # test predictions -> pred_test.txt
-python validate.py       # dev: error rate per attribute and for the full chain
-python test.py           # the same for the test set
+python run.py $S train -data_dir $D -work_dir $W -image_dir $I -save_mode best -patience 3
 ```
 
-`validate.py` and `test.py` read the gold labels from `work/` (`valid.lbl` and `test.lbl`; Amazon:
-`valid.cat` and `test.cat`) and assume 5,000 items per set.
+`analysis/best_epoch.py $W/log.valid.log -metric accuracy` finds the best epoch in a log (for `multilabel`,
+which logs no accuracy, the lowest loss).
 
-`train.sh` trains for up to 500 epochs; there is no automatic early stopping. In the paper, training on
-Rakuten and Kaggle was stopped when the validation accuracy had not improved for three epochs, and Amazon
-models were trained for a fixed number of epochs (Section 4.4). `work/translate_test.sh` names the
-checkpoint selected for each experiment. In some `TXT` and `IMG` folders, `work/translate.sh` still points
-to the checkpoint of the folder it was copied from; the paper reports only test results for these settings.
+The checkpoints of the original experiments load as they are: `translate.py` reads the model type from
+`-model_type` (which `run.py` passes) when the checkpoint does not record it. Predict with the `data.pt`
+that a checkpoint was trained with, which holds its vocabularies; options after the stage override those of
+`run.py`, for example `-vocab <experiment>/dataset/data.pt`.
 
 ## Data
 
@@ -119,38 +117,103 @@ counts as correct if it equals any of them.
 
 ## Analysis scripts
 
-| Purpose | Scripts |
+| Purpose | Script |
 |---|---|
-| Table 5: split the test predictions of all six models into seen and unseen chains and score them | `KaggleDatasetExperiments/TXT+IMG/EncoderDecoder/work/`: `extract_seen.py`, `extract_unseen.py`, `check_seen_acc_chain.py`, `check_unseen_acc_chain.py` (they read `../../<model>/work/pred_test.txt` of the sibling folders) |
-| Unseen chains on Rakuten and Amazon (Section 5.1) | `RakutenDatasetExperiments/TXT+IMG/EncoderDecoder/work/`: `extract_*.py`, `check_*acc_chain.py`; `AmazonDatasetExperiments/TXT+IMG/EncoderDecoder/work/extract_unseen.py` |
-| Test items predicted correctly from text only but not from text+image (Section 5.2) | `KaggleDatasetExperiments/error_analysis/find_errors.py` |
-| Test items where MultiClass, MultiTask and Sequential disagree on BASE COLOR | `KaggleDatasetExperiments/TXT+IMG/MultiLabelMultiClass*/work/comparison/extract_diff.py` |
-| Image-attention heat maps of the Sequential model | `RakutenDatasetExperiments/TXT+IMG/EncoderDecoder/work/`: `translate_vis.sh`, `visualization/visualize_heatmap.py` |
-| Attribute-transition statistics and label frequencies | `dataset/prepare_freqs*.py`, `dataset/get_most_frequent.py`, `dataset/get_max_len.py`, `dataset/extract_subs.py` |
+| Table 5 and Section 5.1: error rates on test items whose chain was seen in training and on the others | `analysis/seen_unseen.py` |
+| Section 5.2: test items predicted correctly from text only but not from text+image | `analysis/find_errors.py` |
+| Test items where MultiClass, MultiTask and Sequential predict three different values of an attribute (Kaggle: base colour) | `analysis/compare_predictions.py` |
+| Heat maps of the image attention of the Sequential model (`translate.py -save_attention`) | `analysis/visualize_heatmap.py` |
+| Chain frequencies, attribute transitions, chain lengths | `analysis/label_stats.py` |
+| The best epoch in a training log | `analysis/best_epoch.py` |
+
+## Differences from the code of the paper's runs
+
+The experiments of the paper were run with a copy of the code for each experiment; the copies are in commit
+`8f21721` (folder `experiments/`). This version merges them. With the settings file of an experiment, it
+computes what the copy of that experiment computed (see [Verification](#verification)). The differences:
+
+**Faster, and less GPU memory**
+
+- No backpropagation through the pretrained ResNet-50, whose weights are not trained (the original code
+  computed their gradients and discarded them).
+- No gradient bookkeeping in validation and prediction.
+- The images are read and transformed in worker processes (`-num_workers`, default 4) while the GPU computes.
+- Prediction in batches: the models that predicted one product at a time batch titles of the same length,
+  which need no padding. MultiClass and Binary MultiLabel keep the batches of the original code
+  (`-batch_size 32`), because the padding of a batch enters their average pooling.
+- The attention weights are no longer written to disk at every decoding step; `translate.py -save_attention
+  DIR` saves those of the last step, for `analysis/visualize_heatmap.py`.
+- `-save_mode best` keeps only the best checkpoint (the original code ignored this option and saved every
+  epoch), and `-patience N` stops training after N epochs without improvement.
+- cuDNN picks the fastest convolution algorithms (`-deterministic` for reproducible ones); prediction does not
+  download the ImageNet weights, which are in the checkpoint.
+
+On a V100 with PyTorch 1.1, a training epoch of 3,200 products took 4 times less time for the Kaggle image
+models (Attentive MultiTask with text and image: 152 s → 38 s; most of the gain is decoding the large Kaggle
+images in parallel) and 1.4 times less for the Rakuten text+image Sequential model; text-only training is as
+fast as before. Predicting a test set of 5,000 products took 6 to 16 times less time (Rakuten text+image
+Sequential: 493 s → 60 s).
+
+**PyTorch 1.1 to 2.x**
+
+- `pack_padded_sequence` gets the lengths on the CPU (required since PyTorch 1.7).
+- `data.pt` and the checkpoints, which contain the options as an `argparse.Namespace`, are loaded with
+  `weights_only=False` (needed since PyTorch 2.6).
+- ResNet-50 gets the ImageNet weights of the experiments (`resnet50-19c8e357.pth`) in every torchvision version.
+- Deprecated calls were replaced (`Variable(volatile=...)`, `size_average=False`).
+- The computations stay in float32 on Ampere and newer GPUs, where PyTorch would use the less precise
+  TensorFloat-32 in cuDNN; `-tf32` allows it, which is faster.
+- `build_vocab.py` sorts by frequency as NumPy 1.x did; NumPy 2 orders equal frequencies differently, which
+  would give words other indices.
+
+**Kept from the original code, although they affect the results**
+
+- The random crop of the images (`RandomCrop` or `RandomResizedCrop`, as in each experiment) and the random
+  flip are applied in validation and prediction too, so the predictions of the image models vary between runs.
+- The BatchNorm layers of the ResNet are in training mode during training.
+- The baselines average the title encodings over the padding positions of a batch.
+- The first update uses Adam's default learning rate; the schedule is applied after each update.
+- `build_vocab.py -mode tokens` gives the most frequent token index 3, the index of `<UNK>`.
+
+**Other changes**
+
+- The Rakuten text+image Sequential model trains; its copy failed with "too many values to unpack".
+- `evaluate.py` divides by the number of products instead of 5,000, and stops if a prediction file is shorter
+  than the gold file.
+- `train.py` creates the checkpoint directory; `-batch_size` and `-d_model` default to 32 and 1024, the values
+  of all experiments; options that had no effect were removed.
+- The logs of Binary MultiLabel have the header `epoch,loss`; the text and text+image versions wrote
+  `epoch,loss,ppl,accuracy` above two columns.
+- `analysis/compare_predictions.py` leaves out a condition of `extract_diff.py` that depended on the iteration
+  order of a Python 2 set; on Kaggle, it lists 150 products instead of 35.
+
+## Verification
+
+- **Original code and this code, PyTorch 1.1 on a V100, all 42 experiments**, on synthetic data with
+  deterministic image transforms and cuDNN: the vocabularies, `data.pt`, the weights and logs after one seeded
+  epoch of training, the predictions (also with the checkpoint of the original code) and the error rates are
+  identical.
+- **The 42 checkpoints of the paper, real data**: the predictions of this code and of the original code are the
+  same on the first 500 test products of every experiment. For the 14 text-only experiments, the predictions on
+  the whole test sets are those saved from the paper's runs.
+- `evaluate.py` and the analysis scripts give the outputs of the original scripts on the predictions saved from
+  the paper's runs (Table 5 included), and `build_vocab.py` the vocabularies of the original scripts (the
+  Rakuten files from 2019 also have trailing spaces, written by Python 2's `json`).
+- **Python 3.12, PyTorch 2.14.1, torchvision 0.29.1 on an A100**: `tests/smoke_test.py` passes for all 42
+  settings files, and the text-only models give the saved predictions of the paper on the whole test sets. The
+  image models agree with the original stack on 93–100% of the first 500 test products: newer Pillow versions
+  decode the JPEG images slightly differently (Pillow 13.0.0 and 6.2.2 differ on all of 60 Rakuten test images
+  and on 26 of 60 Kaggle images).
 
 ## Requirements
 
-The experiments were run in 2019 with Python 3.6 and PyTorch 1.x with CUDA (at least 1.1, for
-`pack_padded_sequence(..., enforce_sorted=False)`; parts of the code call `.cuda()` unconditionally),
-torchvision, NumPy, Pillow and tqdm. The code has not been updated for current PyTorch versions; the
-root-level code has been checked to run (preprocessing, two epochs of training with the settings of
-`work/train.sh`, and decoding, on synthetic data) with Python 3.7, PyTorch 1.1.0 and torchvision 0.3.0 on
-an NVIDIA V100 GPU. The heat-map script also needs OpenCV, scikit-image and matplotlib.
-A few small helper scripts are Python 2: `check_acc_chain.py`, `extract_subs.py`, `get_max_len.py`,
-`prepare_freqs*.py`, and `extract_unseen.py` in the Amazon folder.
-
-## Known issue
-
-In `experiments/RakutenDatasetExperiments/TXT+IMG/EncoderDecoder/model/`, `Decoder.forward` also returns
-the attention weights (added for the heat maps), but `RNMTPlus.forward` unpacks only two values, so
-training fails with `ValueError: too many values to unpack`. This is fixed in the root-level code. To train
-from the experiment folder, change that line in its `rnmtplus/Models.py` to
-
-```python
-decoder_output, _, _ = self.decoder(tgt_seq, encoder_outputs, V)
-```
-
-The other `EncoderDecoder` folders are not affected.
+Python 3.6 or later, PyTorch 1.1 or later with torchvision, NumPy, Pillow and tqdm; a GPU (`-no_cuda` runs on
+the CPU, slowly). Tested with Python 3.7, PyTorch 1.1.0, torchvision 0.3.0 and Pillow 6.2.2 (versions of
+2019, when the experiments were run with Python 3.6 and PyTorch 1.x), and with Python 3.12, PyTorch 2.14.1,
+torchvision 0.29.1 and Pillow 13.0.0, which decodes some JPEG images slightly differently (see
+[Verification](#verification)). The heat-map script also needs OpenCV and scikit-image,
+`analysis/label_stats.py frequency` matplotlib. `python tests/smoke_test.py` runs every experiment on
+synthetic data, to check an installation.
 
 ## Citation
 

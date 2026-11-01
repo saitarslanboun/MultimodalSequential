@@ -1,0 +1,37 @@
+{
+  "experiment": "RakutenDatasetExperiments/IMG/MultiLabelMultiClass",
+  "description": "MultiTask on Rakuten, image input",
+  "model_type": "multitask",
+  "modality": "img",
+  "preprocess": {
+    "train_img": "train.img",
+    "train_tgt": "train.lbl",
+    "valid_img": "valid.img",
+    "valid_tgt": "valid.lbl",
+    "tgt_vocab": "train.lbl.json",
+    "max_len": 1000
+  },
+  "train": {
+    "batch_size": 32,
+    "d_model": 1024,
+    "n_warmup_steps": 4000,
+    "save_mode": "all",
+    "train_crop": "random_crop"
+  },
+  "translate": {
+    "valid": {
+      "img": "valid.img"
+    },
+    "test": {
+      "img": "test.img"
+    },
+    "batch_size": 64,
+    "test_crop": "random_crop"
+  },
+  "evaluate": {
+    "valid": "valid.lbl",
+    "test": "test.lbl",
+    "n_attributes": 7
+  },
+  "paper_checkpoint": "models/model.25.chkpt"
+}
