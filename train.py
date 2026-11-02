@@ -100,8 +100,14 @@ def epoch_result(total_loss, n_total_words, n_total_correct, opt):
     return total_loss / n_total_words.float(), n_total_correct.float() / n_total_words.float()
 
 
-def run_epoch(model, data, crit, opt, optimizer=None):
-    ''' One epoch of training (with an optimizer) or of evaluation (without). '''
+def float_outputs(pred):
+    ''' The model outputs in float32, for the loss (mixed precision computes them in float16). '''
+    return [p.float() for p in pred] if isinstance(pred, list) else pred.float()
+
+
+def run_epoch(model, data, crit, opt, optimizer=None, scaler=None):
+    ''' One epoch of training (with an optimizer) or of evaluation (without). With -amp, the model computes in
+    mixed precision, the loss in float32, and scaler scales the loss so that float16 gradients do not underflow. '''
     training = optimizer is not None
     model.train(training)
     if training and opt.frozen_resnet and hasattr(model, 'image_encoder'):
@@ -114,11 +120,19 @@ def run_epoch(model, data, crit, opt, optimizer=None):
         for _, image, src, tgt in t:
             if training:
                 optimizer.zero_grad()
-            pred = model_forward(model, image, src, tgt, opt)
+            with compat.autocast(opt.amp):
+                pred = model_forward(model, image, src, tgt, opt)
+            if opt.amp:
+                pred = float_outputs(pred)
             loss, n_correct, n_words = compute_loss(crit, pred, tgt, opt)
             if training:
-                loss.backward()
-                optimizer.step()
+                if scaler is not None:
+                    scaler.scale(loss).backward()
+                    scaler.step(optimizer.optimizer)
+                    scaler.update()
+                else:
+                    loss.backward()
+                    optimizer.step()
                 optimizer.update_learning_rate()
             if n_words is not None:
                 n_total_words += n_words
@@ -129,9 +143,9 @@ def run_epoch(model, data, crit, opt, optimizer=None):
     return epoch_result(total_loss, n_total_words, n_total_correct, opt)
 
 
-def train_epoch(model, training_data, crit, optimizer, opt):
+def train_epoch(model, training_data, crit, optimizer, opt, scaler=None):
     ''' Epoch operation in training phase'''
-    return run_epoch(model, training_data, crit, opt, optimizer)
+    return run_epoch(model, training_data, crit, opt, optimizer, scaler)
 
 
 def eval_epoch(model, validation_data, crit, opt):
@@ -175,7 +189,8 @@ class ChainAccuracy(object):
             batches=make_batches(opt.model_type, src_insts, len(self.gold), opt.batch_size))
         check_chain = not opt.no_check_chain
         self.translator = Translator.from_model(
-            model, opt, argparse.Namespace(decode_steps=opt.decode_steps, check_chain=check_chain), device)
+            model, opt, argparse.Namespace(decode_steps=opt.decode_steps, check_chain=check_chain, amp=opt.amp),
+            device)
         self.chain = ChainFormatter(opt.model_type, data['dict']['tgt'], check_chain)
         self.model, self.opt = model, opt
         self.n_attributes = max(len(chain.split()) for chain in self.gold)
@@ -196,7 +211,7 @@ class ChainAccuracy(object):
         return 1.0 - float(errors_all) / len(self.gold)
 
 
-def train(model, training_data, validation_data, crit, optimizer, opt, chain_accuracy=None):
+def train(model, training_data, validation_data, crit, optimizer, opt, chain_accuracy=None, scaler=None):
     ''' Start training '''
     log_train_file = None
     log_valid_file = None
@@ -219,7 +234,7 @@ def train(model, training_data, validation_data, crit, optimizer, opt, chain_acc
         print('[ Epoch', epoch_i, ']')
 
         start = time.time()
-        train_loss, train_accu = train_epoch(model, training_data, crit, optimizer, opt)
+        train_loss, train_accu = train_epoch(model, training_data, crit, optimizer, opt, scaler)
         print(performance_line('Training', train_loss, train_accu, start, opt))
 
         start = time.time()
@@ -337,6 +352,10 @@ def main():
     parser.add_argument('-tf32', action='store_true',
                         help='allow TensorFloat-32 on Ampere and newer GPUs: faster, but less precise than the '
                              'float32 of the experiments')
+    parser.add_argument('-amp', action='store_true',
+                        help='mixed precision: the model computes in float16 where PyTorch allows it (autocast), '
+                             'with loss scaling, in training and validation; the weights stay float32. Faster on '
+                             'GPUs with tensor cores, but other numbers than float32 (PyTorch 1.10 or later)')
 
     kaggle = parser.add_argument_group(
         'the Kaggle data split with -seed (instead of -data; see kaggle_data.py)')
@@ -377,6 +396,8 @@ def main():
     if opt.valid_crop is None:
         opt.valid_crop = 'center_crop' if opt.kaggle_dir else opt.train_crop
     opt.cuda = not opt.no_cuda
+    if opt.amp and not (opt.cuda and compat.amp_supported()):
+        parser.error('-amp needs a GPU and PyTorch 1.10 or later')
     opt.d_word_vec = opt.d_model
     opt.proj1_bias = not opt.no_proj1_bias
     compat.set_deterministic(opt.deterministic)
@@ -481,7 +502,7 @@ def main():
         device = torch.device('cuda' if opt.cuda else 'cpu')
         chain_accuracy = ChainAccuracy(model, data, valid_transform, opt, device)
 
-    train(model, training_data, validation_data, crit, optimizer, opt, chain_accuracy)
+    train(model, training_data, validation_data, crit, optimizer, opt, chain_accuracy, compat.grad_scaler(opt.amp))
 
 
 if __name__ == '__main__':

@@ -11,6 +11,12 @@ import torch.nn.functional as F
 import math
 
 
+def masked_logit(logits):
+    ''' The logit of a masked position: -1e9 as in the original code; in float16 (mixed precision), where -1e9
+    does not fit, the lowest float16 number. Either way, its softmax weight is 0. '''
+    return -1e9 if logits.dtype == torch.float32 else torch.finfo(logits.dtype).min
+
+
 class KeyValAttention(nn.Module):
     
     def __init__(self, scaling=False, dropout_ratio=0):
@@ -42,11 +48,11 @@ class KeyValAttention(nn.Module):
                 mask = self._dropout(mask)
             if mask.dim() < logits.dim():
                 mask = mask.unsqueeze(-2)
-            logits = logits.masked_fill(mask == 0, -1e9)
+            logits = logits.masked_fill(mask == 0, masked_logit(logits))
         elif self._dropout is not None:
             # Using dropout but no mask
             mask = self._dropout(logits.new_ones(logits.shape))
-            logits = logits.masked_fill(mask == 0, -1e9)
+            logits = logits.masked_fill(mask == 0, masked_logit(logits))
         weights = F.softmax(logits, dim=-1)
         context_vector = torch.matmul(weights, values)
         return context_vector, weights

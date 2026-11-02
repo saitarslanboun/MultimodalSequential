@@ -96,9 +96,10 @@ class Translator(object):
         the value of every attribute (multilabel and the multitask models), or, for the sequential model,
         the decoded token indices (<BOS> first); with opt.check_chain, None unless the sequence ends with
         its only <EOS>. vocab_sizes: the attribute vocabulary sizes (multilabel). For the sequential model,
-        also returns the attention weights of the last decoding step (text, image). '''
+        also returns the attention weights of the last decoding step (text, image). With opt.amp, the model
+        computes in mixed precision (float16). '''
         model_type = self.model_opt.model_type
-        with torch.no_grad():
+        with torch.no_grad(), compat.autocast(getattr(self.opt, 'amp', False)):
             if model_type == 'sequential':
                 return self._decode(image, src_seq)
             scores = self.model(image, src_seq)

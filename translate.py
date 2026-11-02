@@ -50,6 +50,8 @@ def main():
     parser.add_argument('-deterministic', action='store_true',
                         help='deterministic algorithms (slower) instead of the fastest ones: cuDNN\'s, and in '
                              'PyTorch 1.8 and later those of all operations')
+    parser.add_argument('-amp', action='store_true',
+                        help='predict in mixed precision (float16 where PyTorch allows it); default: float32')
     parser.add_argument('-tf32', action='store_true',
                         help='allow TensorFloat-32 on Ampere and newer GPUs: faster, but less precise than the '
                              'float32 of the experiments')
@@ -57,6 +59,8 @@ def main():
     opt = parser.parse_args()
     opt.cuda = not opt.no_cuda
     opt.check_chain = not opt.no_check_chain
+    if opt.amp and not (opt.cuda and compat.amp_supported()):
+        parser.error('-amp needs a GPU and PyTorch 1.10 or later')
     checkpoint = compat.torch_load(opt.model, map_location='cpu')
     seed = opt.seed if opt.seed is not None else getattr(checkpoint['settings'], 'seed', None)
     if seed is None:
