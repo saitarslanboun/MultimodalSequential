@@ -1,5 +1,6 @@
 ''' Compatibility with PyTorch 1.1 to 2.x and the matching torchvision versions. '''
 
+import contextlib
 import inspect
 import os
 import random
@@ -80,6 +81,27 @@ def set_deterministic(enabled):
         os.environ.setdefault('CUBLAS_WORKSPACE_CONFIG', ':4096:8')
         if hasattr(torch, 'use_deterministic_algorithms'):
             torch.use_deterministic_algorithms(True)
+
+
+def amp_supported():
+    ''' Whether this PyTorch has automatic mixed precision (torch.autocast, PyTorch 1.10 and later). '''
+    return hasattr(torch, 'autocast')
+
+
+def autocast(enabled):
+    ''' Mixed precision on the GPU (float16, with float32 where PyTorch needs it) if enabled. '''
+    if not enabled:
+        return contextlib.nullcontext()
+    return torch.autocast('cuda', dtype=torch.float16)
+
+
+def grad_scaler(enabled):
+    ''' The loss scaler of mixed-precision training (float16 gradients would underflow), or None. '''
+    if not enabled:
+        return None
+    if hasattr(torch, 'amp') and hasattr(torch.amp, 'GradScaler'):  # PyTorch 2.3 and later
+        return torch.amp.GradScaler('cuda')
+    return torch.cuda.amp.GradScaler()
 
 
 def resnet50(pretrained):

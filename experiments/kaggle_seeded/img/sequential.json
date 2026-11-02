@@ -24,7 +24,7 @@
     "select_by": "chain_accuracy",
     "decode_steps": 9,
     "label_smoothing": 0.1,
-    "train_crop": "random_resized_crop",
+    "train_crop": "resize_random_crop",
     "valid_crop": "center_crop",
     "frozen_resnet": true
   },
