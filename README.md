@@ -23,6 +23,7 @@ implements all models; the settings of each experiment are in a file in `experim
 ├── evaluate.py       computes the error rates of the predictions
 ├── DataLoader.py     batches of images, titles and attribute chains
 ├── kaggle_data.py    splits the Kaggle data with a seed and prepares it (train.py -kaggle_dir)
+├── resize_images.py  resizes the images in advance, for faster training and prediction
 ├── rnmtplus/         the models (Models.py), prediction (Translator.py), RNMT+ layers and attention
 ├── experiments/      the settings of the 42 experiments: <dataset>/<input>/<model>.json;
 │                     <dataset>_fixed/: the same with the fixes for a fair comparison;
@@ -121,8 +122,9 @@ crops and flips, the initial weights and dropout, so a run can be repeated exact
 S=experiments/kaggle_seeded/txt+img/sequential.json
 K=/data/kaggle_fashion   # the Kaggle data: styles.csv and images/
 W=work/kaggle_seeded/txt+img/sequential/seed1
-python run.py $S train     -data_dir $K -work_dir $W -seed 1
-python run.py $S translate -data_dir $K -work_dir $W    # the test set, with $W/models/model.best.chkpt
+python resize_images.py -input $K/images -output $K/images_256    # once (optional, see below)
+python run.py $S train     -data_dir $K -work_dir $W -seed 1 -image_dir $K/images_256
+python run.py $S translate -data_dir $K -work_dir $W -image_dir $K/images_256    # with model.best.chkpt
 python run.py $S evaluate  -data_dir $K -work_dir $W
 ```
 
@@ -150,9 +152,19 @@ Then it trains with the same seed:
 
 `translate` uses the seed of the checkpoint.
 
-The settings use the fixes of the next section. The validation and test images are resized (shorter side 256)
-and center-cropped to 224 × 224, without randomness; the training images keep the random resized crop and flip
-of the paper's runs. Training stops when the full-chain accuracy of the predicted validation chains has not
+`resize_images.py` resizes the images once, as the crops of these settings resize them first (the shorter
+side to 256, keeping the aspect ratio), and saves them without loss (PNG), with a record `resized.json`. With
+`-image_dir $K/images_256`, training and prediction read these copies instead of decoding and resizing the
+full-size photos (most are 1080 × 1440 or 1800 × 2400): the images are the same, and so are the results,
+with the Pillow and torchvision versions that resized them. On a V100 with 6 CPUs, an epoch of the text+image
+Sequential model takes 4.0 instead of 9.9 minutes. Without `-image_dir`, they read `$K/images`. The copies
+appear in `$K/images_256` only when all of them are written (`resize_images.py` works in
+`$K/images_256.partial`), and training and prediction stop if `-image_dir` does not exist, so no run reads an
+unfinished directory.
+
+The settings use the fixes of the next section. The images are resized (shorter side 256, keeping the aspect
+ratio); validation and test take the center 224 × 224, without randomness, and training a random 224 × 224
+crop and a random flip. Training stops when the full-chain accuracy of the predicted validation chains has not
 improved for three epochs and keeps the best checkpoint. Runs with the same seed
 on the same type of GPU and the same software versions give the same files, weights, logs and predictions;
 another GPU type or other versions of PyTorch, Pillow or SentencePiece can give other numbers. The five
@@ -167,7 +179,7 @@ dataset in the same way, as the paper describes, without changing the models:
 
 | Training detail | The paper's runs | The fixed settings | Option |
 |---|---|---|---|
-| Training crop | `RandomCrop` for some Rakuten and Amazon models, `RandomResizedCrop` for the others | the random resized crop and flip that the paper describes, for all | `-train_crop random_resized_crop` |
+| Training crop | `RandomCrop` for some Rakuten and Amazon models, `RandomResizedCrop` for the others | Rakuten and Amazon: the random resized crop and flip that the paper describes, for all; Kaggle: resized (shorter side 256), then a random crop and flip (see below) | `-train_crop random_resized_crop`; Kaggle `-train_crop resize_random_crop` |
 | Validation and test images | random crop and flip | resized and center-cropped, without randomness | `-valid_crop` and `-test_crop center_crop` |
 | Model selection and early stopping | the accuracy of the training targets of each model (tokens given the gold previous ones, attributes or chains), the loss for Binary MultiLabel | the full-chain accuracy of the predicted validation chains, for all models | `-select_by chain_accuracy` |
 | Pretrained ResNet | its BatchNorm statistics are updated in training | entirely frozen, as the paper describes | `-frozen_resnet` |
@@ -176,6 +188,13 @@ dataset in the same way, as the paper describes, without changing the models:
 | Amazon epochs | the checkpoint of the 8th epoch (`model.7.chkpt`) | 7 epochs and the last model, as the paper describes | `-epoch 7 -save_mode last` |
 | Token vocabularies | the most frequent token shares the index of `<UNK>` | every token has its own index | `build_vocab.py -distinct_unk` |
 | Missing attribute values (Kaggle: `NA` in `styles.csv`, `None` for an empty field; 0.8% of the products) | values that the models learn to predict and that are scored | left out of the vocabularies, the losses (index -1, `ignore_index`) and the scores; after a missing value, the Sequential decoder gets `<UNK>` as input | `"missing_values": ["NA", "None"]` (`-missing_values NA,None`) |
+
+The Kaggle photos show the products on a white background, and the random resized crop takes 8% to 100% of a
+photo: on 2,000 training photos of seed 1 (five crops each), 0.9% of its crops were at least 99% background
+and 4.0% at least 90% (accessories 1.8% and 9.0%, footwear 1.7% and 4.5%). The Kaggle settings therefore
+resize the photos first, as for validation and test, and take a random 224 × 224 crop and flip, which always
+shows most of the photo: none of these crops was at least 99% background, 1.7% at least 90% (the center crops
+of validation and test: 1.4%). The paper describes the random resized crop.
 
 The Kaggle settings also leave out product 28319, a test record ("RTV_LoadTest") whose attributes do not match
 its image (`"exclude_ids"`): for `experiments/kaggle_fixed/`, `run.py` writes the data files without it to
@@ -337,6 +356,15 @@ and `experiments/kaggle_seeded/` change them: see [Settings for a fair compariso
   losses (checked against the losses computed without them) and the scores; the 274 missing values of the
   training set of seed 1 became 274 ignored targets, and the Sequential decoder gets the same input for a
   missing value as for `<UNK>`.
+- **The Kaggle training crop and the images resized in advance** (`-train_crop resize_random_crop`,
+  `resize_images.py`): on both stacks, `tests/smoke_test.py` passes for the 24 settings with this crop (on the
+  new stack for all 102 settings files) and `tests/reproducibility_test.py` for the 12 seeded image settings,
+  which give the same data, weights, logs and predictions with the resized images. For all 44,441 Kaggle
+  images, `center_crop` and the seeded and unseeded random crops of `resize_random_crop` give the same tensors
+  from the original and from the copy. One epoch of `experiments/kaggle_seeded/txt+img/sequential.json` with
+  seed 1 on a V100 with 6 CPUs gives the same data, weights, logs and test predictions with the original
+  images and with the copies, in 4.0 instead of 9.9 minutes (training 3.1 instead of 7.7 minutes, the test
+  predictions 47 instead of 99 seconds).
 
 ## Requirements
 

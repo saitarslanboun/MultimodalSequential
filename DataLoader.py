@@ -10,16 +10,26 @@ numpy.random.RandomState([seed, epoch]), the worker processes are seeded from th
 number, and the random crop and flip of an image are drawn with a random.Random seeded with the seed, the
 epoch and the index of the product (SeededRandomTransform, PredictionSeededTransform). The batches of every
 epoch are then the same in all runs with that seed, whatever the number of worker processes.
+
+The image directory can also be one that resize_images.py wrote (it holds RESIZED_RECORD): the images resized
+in advance as the crops center_crop and resize_random_crop resize them first, saved without loss. The loader
+then reads the resized copy <name without extension>.png of an image, which these crops leave as it is, so the
+images are those of the original directory (check_image_dir: only for these crops and their size).
 '''
 
 import functools
+import io
+import json
 import math
 import os
 import random
+import warnings
 
 import numpy as np
+import PIL
 import torch
 import torch.utils.data
+import torchvision
 from PIL import Image
 from torchvision import transforms
 from torchvision.transforms import functional as F
@@ -28,22 +38,77 @@ import rnmtplus.Constants as Constants
 
 # The target formats: token sequences (sequential), class indices (multiclass), one index per attribute.
 TGT_FORMATS = ('sequence', 'chain', 'attributes')
-CROPS = {'random_crop': 'RandomCrop', 'random_resized_crop': 'RandomResizedCrop', 'center_crop': 'CenterCrop'}
+CROPS = {'random_crop': 'RandomCrop', 'random_resized_crop': 'RandomResizedCrop', 'center_crop': 'CenterCrop',
+         'resize_random_crop': 'RandomCrop'}
+# The crops that first resize the shorter side of an image to resize_size(crop_size), keeping the aspect ratio:
+# they can read the images that resize_images.py resized in advance.
+RESIZING_CROPS = ('center_crop', 'resize_random_crop')
 MEAN, STD = (0.485, 0.456, 0.406), (0.229, 0.224, 0.225)  # of ImageNet, for the ResNet
-RESIZE_RATIO = 256 / 224.  # center_crop: resize the shorter side to 256 for a crop of 224, as for ImageNet
+RESIZE_RATIO = 256 / 224.  # the shorter side 256 for a crop of 224, as for ImageNet
 ZERO_IMAGE_SIZE = 224  # the size of the zero image that replaces a missing or unreadable image
+RESIZED_RECORD = 'resized.json'  # written by resize_images.py into the directory of the resized images
+
+
+def resize_size(crop_size):
+    ''' The shorter side to which center_crop and resize_random_crop resize an image: 256 for a crop of 224. '''
+    return int(round(crop_size * RESIZE_RATIO))
 
 
 def image_transform(crop, crop_size=224):
     ''' The image preprocessing.
     random_crop, random_resized_crop: the random crop of the experiment (RandomCrop or RandomResizedCrop) and a
     random horizontal flip, which the paper's runs used in training, validation and prediction alike.
-    center_crop: resize the shorter side to 256/224 of the crop size and crop the center; no randomness. '''
+    resize_random_crop: resize the shorter side to 256/224 of the crop size (keeping the aspect ratio), then a
+    random crop and a random horizontal flip. Unlike random_resized_crop, which can take 8% of the image, the
+    crop always shows most of it.
+    center_crop: resize the same way and crop the center; no randomness. '''
     if crop == 'center_crop':
-        steps = [transforms.Resize(int(round(crop_size * RESIZE_RATIO))), transforms.CenterCrop(crop_size)]
+        steps = [transforms.Resize(resize_size(crop_size)), transforms.CenterCrop(crop_size)]
+    elif crop == 'resize_random_crop':
+        steps = [transforms.Resize(resize_size(crop_size)), transforms.RandomCrop(crop_size),
+                 transforms.RandomHorizontalFlip()]
     else:
         steps = [getattr(transforms, CROPS[crop])(crop_size), transforms.RandomHorizontalFlip()]
     return transforms.Compose(steps + [transforms.ToTensor(), transforms.Normalize(MEAN, STD)])
+
+
+def resized_record(image_dir):
+    ''' The record of resize_images.py if it wrote image_dir, else None. '''
+    path = os.path.join(image_dir, RESIZED_RECORD) if image_dir else None
+    if path is None or not os.path.isfile(path):
+        return None
+    with io.open(path, encoding='utf-8') as f:
+        return json.load(f)
+
+
+def check_image_dir(image_dir, crops, crop_size):
+    ''' Raises ValueError if image_dir does not exist (all images would be zero images), and for a directory of
+    resized images (resize_images.py) if one of the crops does not resize the images first to the size they
+    have; warns if other Pillow or torchvision versions resized them, which can decode and resize the original
+    images slightly differently. '''
+    if not os.path.isdir(image_dir):
+        raise ValueError('the image directory {} does not exist'.format(image_dir))
+    record = resized_record(image_dir)
+    if record is None:
+        return
+    others = sorted(set(crop for crop in crops if crop not in RESIZING_CROPS))
+    if others:
+        raise ValueError('{} holds images resized in advance (resize_images.py), which {} cannot use: it needs '
+                         'the original images'.format(image_dir, ' and '.join(others)))
+    if record['shorter_side'] != resize_size(crop_size):
+        raise ValueError('the images in {} are resized to {}, the crops of {} resize to {}'.format(
+            image_dir, record['shorter_side'], crop_size, resize_size(crop_size)))
+    versions = {'pillow': PIL.__version__, 'torchvision': torchvision.__version__}
+    other_versions = sorted(k for k, v in versions.items() if record.get(k) != v)
+    if other_versions:
+        warnings.warn('{} was resized with {}; this is {}: the images can differ slightly from those resized '
+                      'here'.format(image_dir, ', '.join('{} {}'.format(k, record.get(k)) for k in other_versions),
+                                    ', '.join('{} {}'.format(k, versions[k]) for k in other_versions)))
+
+
+def resized_name(name):
+    ''' The file name that resize_images.py gives the resized copy of the image file name. '''
+    return os.path.splitext(name)[0] + '.png'
 
 
 def _randint(rng, a, b):
@@ -81,10 +146,11 @@ class _SeededTransform(object):
 class SeededRandomTransform(_SeededTransform):
     ''' The random crop and flip of image_transform, drawn with the random.Random given with each image instead
     of the global random number generators. The crops are drawn as by torchvision's RandomCrop and
-    RandomResizedCrop (area 8% to 100%, aspect ratio 3/4 to 4/3). '''
+    RandomResizedCrop (area 8% to 100%, aspect ratio 3/4 to 4/3); resize_random_crop first resizes the image as
+    image_transform does. '''
 
     def __init__(self, crop, crop_size=224):
-        if crop not in ('random_crop', 'random_resized_crop'):
+        if crop not in ('random_crop', 'random_resized_crop', 'resize_random_crop'):
             raise ValueError('not a random crop: ' + crop)
         self.crop = crop
         self.crop_size = crop_size
@@ -95,6 +161,8 @@ class SeededRandomTransform(_SeededTransform):
             top, left, h, w = _resized_crop_params(img, rng)
             img = F.resized_crop(img, top, left, h, w, (size, size))
         else:
+            if self.crop == 'resize_random_crop':
+                img = F.resize(img, resize_size(size))  # as transforms.Resize in image_transform
             width, height = img.size
             if width < size or height < size:
                 raise ValueError('the image is smaller than the crop')
@@ -131,14 +199,16 @@ def _seed_worker(seed, epoch, worker_id):
     torch.manual_seed(worker_seed)
 
 
-def load_image(image_dir, img_inst, transform):
-    ''' The transformed image; a zero image if the name is "None" or the file cannot be read or transformed. '''
+def load_image(image_dir, img_inst, transform, resized=False):
+    ''' The transformed image; a zero image if the name is "None" or the file cannot be read or transformed.
+    resized: image_dir holds the resized copies of resize_images.py, which has none of an image that it could
+    not read or save, so that this image too is a zero image. '''
     if type(img_inst) is list:  # names read with read_instances_from_file: [<BOS>, name, <EOS>]
         img_inst = img_inst[1]
     if img_inst == "None":
         return torch.zeros((3, ZERO_IMAGE_SIZE, ZERO_IMAGE_SIZE))
     try:
-        return transform(Image.open(os.path.join(image_dir, img_inst)))
+        return transform(Image.open(os.path.join(image_dir, resized_name(img_inst) if resized else img_inst)))
     except Exception:
         return torch.zeros((3, ZERO_IMAGE_SIZE, ZERO_IMAGE_SIZE))
 
@@ -153,6 +223,7 @@ class _Instances(torch.utils.data.Dataset):
 
     def __init__(self, image_dir, transform, image_insts, src_insts, tgt_insts, seed=None):
         self.image_dir = image_dir
+        self.resized = image_insts is not None and resized_record(image_dir) is not None
         self.transform = transform
         self.image_insts = image_insts
         self.src_insts = src_insts
@@ -170,7 +241,7 @@ class _Instances(torch.utils.data.Dataset):
             if isinstance(transform, _SeededTransform):
                 rng = random.Random('{} {} {}'.format(self.seed, self.epoch, index))
                 transform = functools.partial(transform, rng=rng)
-            image = load_image(self.image_dir, self.image_insts[index], transform)
+            image = load_image(self.image_dir, self.image_insts[index], transform, self.resized)
         src = self.src_insts[index] if self.src_insts is not None else None
         tgt = self.tgt_insts[index] if self.tgt_insts is not None else None
         return index, image, src, tgt

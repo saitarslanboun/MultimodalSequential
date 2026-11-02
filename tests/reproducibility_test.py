@@ -1,7 +1,8 @@
 ''' Checks that training on the Kaggle data split with a seed is reproducible, with synthetic data: for every
 settings file in experiments/kaggle_seeded/ (or the given ones), run.py train (two epochs of a smaller model)
 and translate twice with the same seed, once without and once with worker processes. The prepared data, the
-weights, the logs and the predictions must be identical. A run with another seed must give another split.
+weights, the logs and the predictions must be identical; for the image models also those of a third run that
+reads the images resized in advance (resize_images.py). A run with another seed must give another split.
 
     python tests/reproducibility_test.py [SETTINGS ...] [-keep DIR] [-no_cuda]
 
@@ -11,6 +12,7 @@ Prints one line per settings file and exits with status 1 if any of them fails.
 import argparse
 import glob
 import io
+import json
 import os
 import random
 import shutil
@@ -81,23 +83,35 @@ def main():
     root = opt.keep or tempfile.mkdtemp(prefix='reproducibility_test_')
     data_dir = os.path.join(root, 'kaggle_raw')
     make_kaggle_data(data_dir, random.Random(0))
+    resized_dir = os.path.join(root, 'kaggle_raw_images_256')
+    with open(os.devnull, 'w') as devnull:
+        subprocess.check_call([sys.executable, os.path.join(REPO, 'resize_images.py'), '-input',
+                               os.path.join(data_dir, 'images'), '-output', resized_dir, '-workers', '2'],
+                              stdout=devnull)
     cuda = ['-no_cuda'] if opt.no_cuda else []
     train = ['-epoch', '2', '-n_layers', '3', '-batch_size', '4', '-save_mode', 'best'] + KAGGLE_OPTIONS + cuda
     other_seed = ['-seed', '2']  # KAGGLE_OPTIONS has -seed 1
     failures = 0
     for path in settings:
         name = os.path.relpath(path, os.path.join(REPO, 'experiments')).replace('.json', '')
+        with io.open(path, encoding='utf-8') as f:
+            images = 'img' in json.load(f)['modality']
         work = lambda run_name: os.path.join(root, 'work', name, run_name)
         start = time.time()
         os.makedirs(work(''))
         with open(os.path.join(root, 'work', name, 'log'), 'w') as log:
             try:
-                for run_name, workers in (('a', '0'), ('b', '2')):
-                    run(path, 'train', data_dir, work(run_name), train + ['-num_workers', workers], log)
+                runs = [('a', '0', []), ('b', '2', [])]
+                if images:
+                    runs.append(('r', '2', ['-image_dir', resized_dir]))
+                for run_name, workers, image_dir in runs:
+                    run(path, 'train', data_dir, work(run_name), train + ['-num_workers', workers] + image_dir, log)
                     run(path, 'translate', data_dir, work(run_name), ['-batch_size', '4', '-num_workers', workers]
-                        + cuda, log)
+                        + image_dir + cuda, log)
                 run(path, 'train', data_dir, work('c'), train + other_seed + ['-epoch', '1'], log)
                 found = differences(work('a'), work('b'))
+                if images:
+                    found += [d + ' (resized images)' for d in differences(work('a'), work('r'))]
                 if read(os.path.join(work('a'), 'data', 'test.img')) == read(os.path.join(work('c'), 'data', 'test.img')):
                     found.append('the test set of another seed is the same')
                 status = 'identical' if not found else 'DIFFERENT: ' + ', '.join(found)

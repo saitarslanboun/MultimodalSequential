@@ -6,7 +6,7 @@ import os
 import torch
 from tqdm import tqdm
 
-from DataLoader import CROPS, DataLoader, PredictionSeededTransform, image_transform
+from DataLoader import CROPS, DataLoader, PredictionSeededTransform, check_image_dir, image_transform
 from preprocess import convert_instance_to_idx_seq, read_instances_from_file
 from rnmtplus import compat
 from rnmtplus.Models import MODEL_TYPES, uses_image, uses_text
@@ -20,7 +20,9 @@ def main():
     parser.add_argument('-vocab', required=True, help='the data.pt of the experiment (preprocess.py)')
     parser.add_argument('-img', help='image file names, one line per product (image models)')
     parser.add_argument('-src', help='titles, one line per product (text models)')
-    parser.add_argument('-image_dir', help='the image directory (image models)')
+    parser.add_argument('-image_dir',
+                        help='the image directory (image models), or the images resized in advance by '
+                             'resize_images.py, for the crops that resize first (center_crop, resize_random_crop)')
     parser.add_argument('-output', default='pred.txt',
                         help="""Path to output the predictions (each line will be the decoded sequence""")
     parser.add_argument('-batch_size', type=int, default=30,
@@ -29,8 +31,9 @@ def main():
                         help='the model type, if the checkpoint does not record it (original checkpoints)')
     parser.add_argument('-crop_size', type=int, default=224, help='size for randomly cropping images')
     parser.add_argument('-test_crop', choices=sorted(CROPS), default='random_resized_crop',
-                        help='the crop of the images: the random crop of the experiment, or center_crop '
-                             '(resize and crop the center, without randomness)')
+                        help='the crop of the images: the random crop of the experiment (random_crop, '
+                             'random_resized_crop, resize_random_crop), or center_crop (resize and crop the '
+                             'center, without randomness)')
     parser.add_argument('-decode_steps', type=int, default=8,
                         help='sequential: the number of decoded tokens, attributes plus <EOS> '
                              '(Rakuten 8, Kaggle 9, Amazon 10)')
@@ -79,6 +82,11 @@ def main():
     modality = translator.model_opt.modality
     if uses_image(modality) and not (opt.img and opt.image_dir):
         parser.error('the image models need -img and -image_dir')
+    if uses_image(modality):
+        try:
+            check_image_dir(opt.image_dir, [opt.test_crop], opt.crop_size)
+        except ValueError as e:
+            parser.error(str(e))
     if uses_text(modality) and not opt.src:
         parser.error('the text models need -src')
 

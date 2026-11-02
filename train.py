@@ -15,7 +15,7 @@ from tqdm import tqdm
 
 import kaggle_data
 import rnmtplus.Constants as Constants
-from DataLoader import CROPS, DataLoader, SeededRandomTransform, image_transform
+from DataLoader import CROPS, DataLoader, SeededRandomTransform, check_image_dir, image_transform
 from evaluate import attribute_errors
 from preprocess import TGT_FORMATS
 from rnmtplus import compat
@@ -285,7 +285,10 @@ def main():
     parser.add_argument('-model_type', required=True, choices=MODEL_TYPES)
     parser.add_argument('-modality', choices=MODALITIES, help='default: the inputs in -data')
     parser.add_argument('-data', help='data.pt (preprocess.py); or -kaggle_dir')
-    parser.add_argument('-image_dir', help='the image directory (image models; default with -kaggle_dir: its images/)')
+    parser.add_argument('-image_dir',
+                        help='the image directory (image models; default with -kaggle_dir: its images/), or the '
+                             'images resized in advance by resize_images.py, for the crops that resize first '
+                             '(center_crop, resize_random_crop): the same images, read faster')
 
     parser.add_argument('-epoch', type=int, default=500)
     parser.add_argument('-batch_size', type=int, default=32)
@@ -297,7 +300,9 @@ def main():
     parser.add_argument('-crop_size', type=int, default=224, help='size for randomly cropping images')
     parser.add_argument('-train_crop', choices=sorted(CROPS),
                         help='the crop of the images in training (default: random_crop; with -kaggle_dir '
-                             'random_resized_crop, as in the paper\'s Kaggle runs)')
+                             'random_resized_crop, as in the paper\'s Kaggle runs). resize_random_crop: resize '
+                             'the shorter side to 256 (for -crop_size 224) and crop at random, which keeps '
+                             'most of the image, unlike random_resized_crop (8%% to 100%% of it)')
     parser.add_argument('-valid_crop', choices=sorted(CROPS),
                         help='the crop of the images in validation (default: -train_crop, as in the paper\'s '
                              'runs; with -kaggle_dir center_crop)')
@@ -419,6 +424,11 @@ def main():
                                                      else 'text'))
     if uses_image(opt.modality) and not opt.image_dir:
         parser.error('the image models need -image_dir')
+    if uses_image(opt.modality):
+        try:
+            check_image_dir(opt.image_dir, [opt.train_crop, opt.valid_crop], opt.crop_size)
+        except ValueError as e:
+            parser.error(str(e))
     if opt.select_by == 'chain_accuracy' and 'chains' not in data['valid']:
         parser.error('-select_by chain_accuracy needs the validation chains in data.pt: run preprocess.py again')
     tgt_format = TGT_FORMATS[opt.model_type]
