@@ -1,5 +1,6 @@
-''' Checks that training on the Kaggle data split with a seed is reproducible, with synthetic data: for every
-settings file in experiments/kaggle_seeded/ (or the given ones), run.py train (two epochs of a smaller model)
+''' Checks that training on the Kaggle or H&M data split with a seed is reproducible, with synthetic data: for
+every settings file in experiments/kaggle_seeded/ and hm_seeded/ (or the given ones), run.py train (two epochs of
+a smaller model)
 and translate twice with the same seed, once without and once with worker processes. The prepared data, the
 weights, the logs and the predictions must be identical; for the image models also those of a third run that
 reads the images resized in advance (resize_images.py). A run with another seed must give another split.
@@ -27,7 +28,7 @@ REPO = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, REPO)
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from rnmtplus import compat  # noqa: E402
-from smoke_test import KAGGLE_OPTIONS, make_kaggle_data  # noqa: E402
+from smoke_test import KAGGLE_OPTIONS, make_hm_data, make_kaggle_data  # noqa: E402
 
 TEXT_FILES = ['{}.{}'.format(split, ext) for split in ('train', 'valid', 'test')
               for ext in ('img', 'tit', 'enc.tit', 'lbl')] + ['sp.model', 'sp.vocab', 'train.enc.tit.json',
@@ -75,25 +76,32 @@ def differences(work_a, work_b):
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    parser.add_argument('settings', nargs='*', help='default: experiments/kaggle_seeded/*/*.json')
+    parser.add_argument('settings', nargs='*', help='default: experiments/kaggle_seeded/*/*.json and hm_seeded')
     parser.add_argument('-keep', metavar='DIR', help='keep the data and the outputs in DIR')
     parser.add_argument('-no_cuda', action='store_true')
     opt = parser.parse_args()
-    settings = opt.settings or sorted(glob.glob(os.path.join(REPO, 'experiments', 'kaggle_seeded', '*', '*.json')))
+    settings = opt.settings or sorted(glob.glob(os.path.join(REPO, 'experiments', 'kaggle_seeded', '*', '*.json')) +
+                                      glob.glob(os.path.join(REPO, 'experiments', 'hm_seeded', '*', '*.json')))
     root = opt.keep or tempfile.mkdtemp(prefix='reproducibility_test_')
-    data_dir = os.path.join(root, 'kaggle_raw')
-    make_kaggle_data(data_dir, random.Random(0))
-    resized_dir = os.path.join(root, 'kaggle_raw_images_256')
-    with open(os.devnull, 'w') as devnull:
-        subprocess.check_call([sys.executable, os.path.join(REPO, 'resize_images.py'), '-input',
-                               os.path.join(data_dir, 'images'), '-output', resized_dir, '-workers', '2'],
-                              stdout=devnull)
+    # The data and its images resized in advance, per dataset.
+    datasets = {}
+    for dataset, raw, make, seed in (('kaggle_seeded', 'kaggle_raw', make_kaggle_data, 0),
+                                     ('hm_seeded', 'hm_raw', make_hm_data, 1)):
+        data_dir = os.path.join(root, raw)
+        make(data_dir, random.Random(seed))
+        resized_dir = os.path.join(root, raw + '_images_256')
+        with open(os.devnull, 'w') as devnull:
+            subprocess.check_call([sys.executable, os.path.join(REPO, 'resize_images.py'), '-input',
+                                   os.path.join(data_dir, 'images'), '-output', resized_dir, '-workers', '2'],
+                                  stdout=devnull)
+        datasets[dataset] = data_dir, resized_dir
     cuda = ['-no_cuda'] if opt.no_cuda else []
     train = ['-epoch', '2', '-n_layers', '3', '-batch_size', '4', '-save_mode', 'best'] + KAGGLE_OPTIONS + cuda
     other_seed = ['-seed', '2']  # KAGGLE_OPTIONS has -seed 1
     failures = 0
     for path in settings:
         name = os.path.relpath(path, os.path.join(REPO, 'experiments')).replace('.json', '')
+        data_dir, resized_dir = datasets[os.path.basename(os.path.dirname(os.path.dirname(path)))]
         with io.open(path, encoding='utf-8') as f:
             images = 'img' in json.load(f)['modality']
         work = lambda run_name: os.path.join(root, 'work', name, run_name)

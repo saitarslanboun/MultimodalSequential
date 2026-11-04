@@ -7,7 +7,7 @@ import torch
 
 import rnmtplus.Constants as Constants
 from rnmtplus import compat
-from rnmtplus.Models import architecture_from_state_dict, build_model
+from rnmtplus.Models import architecture_from_state_dict, build_model, split_images
 
 
 def make_batches(model_type, src_insts, n_insts, batch_size):
@@ -119,7 +119,7 @@ class Translator(object):
     def _decode(self, image, src_seq):
         model = self.model
         V, encoder_outputs = model.encode(image, src_seq)
-        batch_size = (image if image is not None else src_seq).size(0)
+        batch_size = (split_images(image)[0] if image is not None else src_seq).size(0)
         tgt_seq = torch.ones((batch_size, 1), dtype=torch.long, device=self.device)  # <BOS>
         attentions = (None, None)
         for _ in range(self.opt.decode_steps):

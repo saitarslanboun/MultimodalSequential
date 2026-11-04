@@ -133,12 +133,23 @@ def prepare(kaggle_dir, output_dir, model_type, seed, valid_size=5000, test_size
     missing_values, exclude_ids: comma-separated values and product ids (see above). '''
     if not 0 <= seed < 2 ** 32:
         raise ValueError('the seed must be between 0 and 2**32 - 1')
+    checksum = ('styles_csv_md5', file_md5(os.path.join(kaggle_dir, 'styles.csv')))
+    return prepare_products(read_products(kaggle_dir), checksum, kaggle_dir, output_dir, model_type, seed,
+                            valid_size, test_size, sp_vocab_size, distinct_unk, missing_values, exclude_ids)
+
+
+def prepare_products(products, checksum, source_dir, output_dir, model_type, seed, valid_size=5000,
+                     test_size=5000, sp_vocab_size=4000, distinct_unk=False, missing_values='', exclude_ids=''):
+    ''' The steps of prepare() for the products (Product) of a dataset in source_dir; hm_data.py prepares the H&M
+    data with them. checksum: the key and the checksum of the dataset's file, the first entry of split.json. '''
+    if not 0 <= seed < 2 ** 32:
+        raise ValueError('the seed must be between 0 and 2**32 - 1')
     missing = [v for v in missing_values.split(',') if v]
     excluded = [i for i in exclude_ids.split(',') if i]
-    products = [p for p in read_products(kaggle_dir) if p.id not in excluded]
+    products = [p for p in products if p.id not in excluded]
     n_valid, n_test = split_sizes(valid_size, test_size, len(products))
     tgt_format = preprocess.TGT_FORMATS[model_type]
-    settings = OrderedDict([('styles_csv_md5', file_md5(os.path.join(kaggle_dir, 'styles.csv'))), ('seed', seed),
+    settings = OrderedDict([checksum, ('seed', seed),
                             ('valid_size', n_valid), ('test_size', n_test), ('sp_vocab_size', sp_vocab_size),
                             ('tgt_format', tgt_format), ('distinct_unk', bool(distinct_unk)),
                             ('missing_values', missing), ('exclude_ids', excluded)])
@@ -154,7 +165,7 @@ def prepare(kaggle_dir, output_dir, model_type, seed, valid_size=5000, test_size
         os.makedirs(output_dir)
     path = lambda name: os.path.join(output_dir, name)
     print('[Info] Splitting the {} products of {} with seed {}: {} training, {} validation, {} test'.format(
-        len(products), kaggle_dir, seed, len(products) - n_valid - n_test, n_valid, n_test))
+        len(products), source_dir, seed, len(products) - n_valid - n_test, n_valid, n_test))
 
     splits = split_indices(len(products), seed, n_valid, n_test)
     for name, indices in splits.items():
@@ -179,7 +190,7 @@ def prepare(kaggle_dir, output_dir, model_type, seed, valid_size=5000, test_size
 
     import sentencepiece
     settings['products'] = OrderedDict((name, len(indices)) for name, indices in splits.items())
-    settings['source'] = os.path.abspath(kaggle_dir)
+    settings['source'] = os.path.abspath(source_dir)
     settings['sentencepiece_version'] = getattr(sentencepiece, '__version__', 'unknown')
     with io.open(split_file, 'w', encoding='utf-8') as f:
         f.write(json.dumps(settings, indent=2, ensure_ascii=False) + u'\n')

@@ -12,7 +12,14 @@ All models encode the image with ResNet-50 and the title with the RNMT+ encoder 
     (Self-Attentive MultiTask, Eq. 8).
 
 The parameter names are those of the original experiment code, so the checkpoints of the paper load.
+
+The image input is a batch of images, or MaskedImages: the images and their presence (train.py
+-mask_missing_images). The models leave out the image of an absent product: its image features are zero, the
+attention of the attentive baselines leaves out its regions, and the Sequential decoder gets no image context
+for it. Its text and targets are used as usual.
 '''
+
+from collections import namedtuple
 
 from torch.nn.utils.rnn import pack_padded_sequence, pad_packed_sequence
 
@@ -36,6 +43,24 @@ def uses_text(modality):
 
 def uses_image(modality):
     return modality in ('img', 'txt+img')
+
+
+class MaskedImages(namedtuple('MaskedImages', ['images', 'present'])):
+    ''' A batch of images (or of their features) with present, a uint8 tensor with one value per image: 0 for
+    a product without an image, whose image the models leave out (see above). '''
+    __slots__ = ()
+
+
+def split_images(image):
+    ''' The images (or features) and their presence: None if image is a plain tensor, all images present. '''
+    if isinstance(image, MaskedImages):
+        return image.images, image.present
+    return image, None
+
+
+def per_image(present, like):
+    ''' present (one value per image) as a factor of a batch x positions x features tensor like. '''
+    return present.view(-1, 1, 1).to(like.dtype)
 
 
 def avg_pool(states):
@@ -115,8 +140,10 @@ class Decoder(nn.Module):
 
     def forward(self, tgt_seq, encoder_outputs, V):
         ''' tgt_seq: the target prefixes; encoder_outputs: (states, mask) of the text encoder; V: the image
-        features. Returns the states of the last layer, its last hidden state and the attention weights of
-        the first layer over the title and the image (None for a missing input). '''
+        features, or MaskedImages of them (no image context for an absent image). Returns the states of the
+        last layer, its last hidden state and the attention weights of the first layer over the title and the
+        image (None for a missing input). '''
+        V, present = split_images(V)
         dec_states = self.dropout(self.tgt_embed_layer(tgt_seq))
         txt_attention = img_attention = None
         contexts = []
@@ -131,6 +158,8 @@ class Decoder(nn.Module):
                     contexts.append(context_txt)
                 if self.use_image:
                     context_img, img_attention = self.attention_img(dec_states, V, V)
+                    if present is not None:
+                        context_img = context_img * per_image(present, context_img)
                     contexts.append(context_img)
             else:
                 prev_states = dec_states
@@ -179,8 +208,14 @@ class SequentialModel(_Model):
         self._freeze_image_encoder()
 
     def encode(self, image, src_seq):
-        ''' The image features and the text encoder outputs (None for a missing input). '''
-        V = self.image_encoder(image) if uses_image(self.modality) else None
+        ''' The image features and the text encoder outputs (None for a missing input). For MaskedImages, the
+        features are MaskedImages too. '''
+        V = None
+        if uses_image(self.modality):
+            images, present = split_images(image)
+            V = self.image_encoder(images)
+            if present is not None:
+                V = MaskedImages(V, present)
         encoder_outputs = self.text_encoder(src_seq) if uses_text(self.modality) else None
         return V, encoder_outputs
 
@@ -244,7 +279,12 @@ class AttributeModel(_Model):
 
     def forward(self, image, src_seq):
         ''' The scores: one tensor (multiclass, multilabel) or one tensor per attribute (multitask models). '''
-        V = self.image_encoder(image) if uses_image(self.modality) else None
+        images, present = split_images(image)
+        V = self.image_encoder(images) if uses_image(self.modality) else None
+        if V is None:
+            present = None
+        elif present is not None:  # zero features for an absent image
+            V = V * per_image(present, V)
         T, src_mask = self.text_encoder(src_seq) if uses_text(self.modality) else (None, None)
         if not self.mask_padding:
             src_mask = None
@@ -265,8 +305,12 @@ class AttributeModel(_Model):
         else:
             memory = [queries] + encodings
         mask = None
-        if src_mask is not None:  # attend to the tokens of the titles, the image regions and the queries
+        if src_mask is not None and present is None:  # attend to the tokens of the titles, the image regions
             mask = torch.cat([src_mask if X is T else src_mask.new_ones(X.shape[:2]) for X in memory], dim=1)
+        elif present is not None:  # also leave out the regions of an absent image
+            regions = present.long().unsqueeze(1).expand(-1, V.shape[1])
+            mask = torch.cat([regions if X is V else (src_mask if X is T and src_mask is not None
+                                                       else regions.new_ones(X.shape[:2])) for X in memory], dim=1)
         memory = memory[0] if len(memory) == 1 else torch.cat(memory, dim=1)
         context, _ = self.attention(queries, memory, memory, mask)
         att_input = torch.cat((queries, context), dim=2)

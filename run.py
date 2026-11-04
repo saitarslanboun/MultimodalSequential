@@ -24,6 +24,9 @@ Kaggle data (styles.csv and images/), and there are no vocab and preprocess stag
     python run.py SETTINGS train -data_dir KAGGLE -work_dir WORK -seed 1
     python run.py SETTINGS translate -data_dir KAGGLE -work_dir WORK    (WORK/models/model.best.chkpt)
     python run.py SETTINGS evaluate -data_dir KAGGLE -work_dir WORK
+
+The settings in experiments/hm_seeded/ do the same with the H&M data (hm_data.py): DATA is then the directory of
+articles.csv and images/.
 '''
 
 import argparse
@@ -32,6 +35,7 @@ import json
 import os
 import subprocess
 import sys
+from collections import OrderedDict
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 STAGES = ('vocab', 'preprocess', 'train', 'translate', 'evaluate')
@@ -116,23 +120,31 @@ def exclude_products(settings, opt):
     return out
 
 
-def kaggle_commands(settings, opt):
-    ''' The commands of the stage for the Kaggle data split with -seed (experiments/kaggle_seeded): train
-    prepares the data in WORK/data. '''
+# The datasets split with -seed: the key of their settings, the option of train.py, the name, the data
+# directory option of train.py.
+SPLIT_DATASETS = OrderedDict([('kaggle', ('-kaggle_dir', 'Kaggle', '-kaggle_data_dir')),
+                              ('hm', ('-hm_dir', 'H&M', '-split_data_dir'))])
+
+
+def split_commands(settings, opt):
+    ''' The commands of the stage for the Kaggle or H&M data split with -seed (experiments/kaggle_seeded,
+    experiments/hm_seeded): train prepares the data in WORK/data. '''
+    key = next(k for k in SPLIT_DATASETS if k in settings)
+    option, name, data_option = SPLIT_DATASETS[key]
     work = lambda name: os.path.join(opt.work_dir, name)
     prepared = lambda name: os.path.join(opt.work_dir, 'data', name)
     model_type, modality = settings['model_type'], settings['modality']
     image_dir = opt.image_dir or os.path.join(opt.data_dir, 'images')
     if opt.stage in ('vocab', 'preprocess'):
-        sys.exit('{} has no {} stage: train splits the Kaggle data with -seed and prepares it in '
-                 'WORK/data'.format(opt.settings, opt.stage))
+        sys.exit('{} has no {} stage: train splits the {} data with -seed and prepares it in '
+                 'WORK/data'.format(opt.settings, opt.stage, name))
     if opt.stage == 'train':
-        args = ['-model_type', model_type, '-modality', modality, '-kaggle_dir', opt.data_dir,
-                '-kaggle_data_dir', work('data'), '-save_model', work('models'), '-log', work('log')]
+        args = ['-model_type', model_type, '-modality', modality, option, opt.data_dir,
+                data_option, work('data'), '-save_model', work('models'), '-log', work('log')]
         if 'img' in modality:
             args += ['-image_dir', image_dir]
         return [[script('train.py')] + args + missing_flags(settings) +
-                flags({'exclude_ids': settings.get('exclude_ids')}) + flags(settings['kaggle']) +
+                flags({'exclude_ids': settings.get('exclude_ids')}) + flags(settings[key]) +
                 flags(settings['train'])]
     if opt.stage == 'translate':
         args = ['-model_type', model_type, '-model', default_checkpoint(settings, opt),
@@ -149,8 +161,8 @@ def kaggle_commands(settings, opt):
 
 def commands(settings, opt):
     ''' The commands (argument lists) of the stage. '''
-    if 'kaggle' in settings:
-        return kaggle_commands(settings, opt)
+    if any(k in settings for k in SPLIT_DATASETS):
+        return split_commands(settings, opt)
     data_dir = exclude_products(settings, opt)
     data = lambda name: os.path.join(data_dir, name)
     work = lambda name: os.path.join(opt.work_dir, name)
@@ -212,9 +224,10 @@ def main():
     parser.add_argument('settings', help='experiments/<dataset>/<input>/<model>.json')
     parser.add_argument('stage', choices=STAGES)
     parser.add_argument('-data_dir', required=True,
-                        help='the data files of the dataset (experiments/kaggle_seeded: the Kaggle data)')
-    parser.add_argument('-image_dir', help='the images (image models; experiments/kaggle_seeded: default '
-                                           'DATA/images)')
+                        help='the data files of the dataset (experiments/kaggle_seeded: the Kaggle data; '
+                             'experiments/hm_seeded: the H&M data)')
+    parser.add_argument('-image_dir', help='the images (image models; experiments/kaggle_seeded and hm_seeded: '
+                                           'default DATA/images)')
     parser.add_argument('-work_dir', default='.', help='for data.pt, vocabularies, models, logs and predictions')
     parser.add_argument('-split', choices=sorted(PREDICTIONS), default='test', help='translate, evaluate')
     parser.add_argument('-checkpoint', help='translate: the checkpoint to use')

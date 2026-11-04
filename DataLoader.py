@@ -15,6 +15,11 @@ The image directory can also be one that resize_images.py wrote (it holds RESIZE
 in advance as the crops center_crop and resize_random_crop resize them first, saved without loss. The loader
 then reads the resized copy <name without extension>.png of an image, which these crops leave as it is, so the
 images are those of the original directory (check_image_dir: only for these crops and their size).
+
+With mask_missing_images (train.py -mask_missing_images), a product without an image (the name None, or an
+image that cannot be read or transformed) is marked absent: the batches then hold MaskedImages (the images and
+their presence), and the models leave out the image of an absent product, which keeps its text and targets.
+Without it, such a product gets a zero image, as in the original code.
 '''
 
 import functools
@@ -35,6 +40,7 @@ from torchvision import transforms
 from torchvision.transforms import functional as F
 
 import rnmtplus.Constants as Constants
+from rnmtplus.Models import MaskedImages
 
 # The target formats: token sequences (sequential), class indices (multiclass), one index per attribute.
 TGT_FORMATS = ('sequence', 'chain', 'attributes')
@@ -199,18 +205,23 @@ def _seed_worker(seed, epoch, worker_id):
     torch.manual_seed(worker_seed)
 
 
-def load_image(image_dir, img_inst, transform, resized=False):
-    ''' The transformed image; a zero image if the name is "None" or the file cannot be read or transformed.
-    resized: image_dir holds the resized copies of resize_images.py, which has none of an image that it could
-    not read or save, so that this image too is a zero image. '''
+def read_image(image_dir, img_inst, transform, resized=False):
+    ''' The transformed image and whether it is present: a zero image and False if the name is "None" or the
+    file cannot be read or transformed. resized: image_dir holds the resized copies of resize_images.py, which
+    has none of an image that it could not read or save, so that this image too is a zero image. '''
     if type(img_inst) is list:  # names read with read_instances_from_file: [<BOS>, name, <EOS>]
         img_inst = img_inst[1]
     if img_inst == "None":
-        return torch.zeros((3, ZERO_IMAGE_SIZE, ZERO_IMAGE_SIZE))
+        return torch.zeros((3, ZERO_IMAGE_SIZE, ZERO_IMAGE_SIZE)), False
     try:
-        return transform(Image.open(os.path.join(image_dir, resized_name(img_inst) if resized else img_inst)))
+        return transform(Image.open(os.path.join(image_dir, resized_name(img_inst) if resized else img_inst))), True
     except Exception:
-        return torch.zeros((3, ZERO_IMAGE_SIZE, ZERO_IMAGE_SIZE))
+        return torch.zeros((3, ZERO_IMAGE_SIZE, ZERO_IMAGE_SIZE)), False
+
+
+def load_image(image_dir, img_inst, transform, resized=False):
+    ''' The transformed image; a zero image if the name is "None" or the file cannot be read or transformed. '''
+    return read_image(image_dir, img_inst, transform, resized)[0]
 
 
 def pad_to_longest(insts):
@@ -235,26 +246,29 @@ class _Instances(torch.utils.data.Dataset):
         return len(self.src_insts if self.src_insts is not None else self.image_insts)
 
     def __getitem__(self, index):
-        image = None
+        image = present = None
         if self.image_insts is not None:
             transform = self.transform
             if isinstance(transform, _SeededTransform):
                 rng = random.Random('{} {} {}'.format(self.seed, self.epoch, index))
                 transform = functools.partial(transform, rng=rng)
-            image = load_image(self.image_dir, self.image_insts[index], transform, self.resized)
+            image, present = read_image(self.image_dir, self.image_insts[index], transform, self.resized)
         src = self.src_insts[index] if self.src_insts is not None else None
         tgt = self.tgt_insts[index] if self.tgt_insts is not None else None
-        return index, image, src, tgt
+        return index, image, present, src, tgt
 
 
 class _Collate(object):
 
-    def __init__(self, tgt_format):
+    def __init__(self, tgt_format, mask_missing_images=False):
         self.tgt_format = tgt_format
+        self.mask_missing_images = mask_missing_images
 
     def __call__(self, items):
-        indices, images, srcs, tgts = zip(*items)
+        indices, images, presents, srcs, tgts = zip(*items)
         image = torch.stack(images) if images[0] is not None else None
+        # uint8 rather than bool, which PyTorch 1.1 does not have
+        present = torch.tensor(presents, dtype=torch.uint8) if image is not None and self.mask_missing_images else None
         src = pad_to_longest(srcs) if srcs[0] is not None else None
         if tgts[0] is None:
             tgt = None
@@ -262,23 +276,24 @@ class _Collate(object):
             tgt = pad_to_longest(tgts)
         else:
             tgt = torch.LongTensor(list(tgts))
-        return list(indices), image, src, tgt
+        return list(indices), image, present, src, tgt
 
 
 class DataLoader(object):
     ''' Iterating over it gives the batches of an epoch as tuples (indices, image, src, tgt): the indices of the
-    products in the data, the images (batch x 3 x 224 x 224), the padded titles (batch x length) and the
-    targets (a padded batch x length tensor for 'sequence', batch for 'chain', batch x attributes for
-    'attributes'); None for what the data does not have. '''
+    products in the data, the images (batch x 3 x 224 x 224; with mask_missing_images, MaskedImages of them and
+    their presence), the padded titles (batch x length) and the targets (a padded batch x length tensor for
+    'sequence', batch for 'chain', batch x attributes for 'attributes'); None for what the data does not
+    have. '''
 
     def __init__(self, transform, image_dir, src_word2idx, tgt_word2idx, image_insts=None, src_insts=None,
                  tgt_insts=None, tgt_format='sequence', cuda=True, batch_size=64, shuffle=True, test=False,
-                 num_workers=0, batches=None, seed=None):
+                 num_workers=0, batches=None, seed=None, mask_missing_images=False):
         ''' image_insts, src_insts, tgt_insts: the instances of data.pt (preprocess.py); for the 'attributes'
         format, tgt_insts has one list per attribute. batches: lists of indices to use as the batches,
         instead of slices of batch_size (no shuffling). seed: shuffle and transform the images with this seed
-        (see above) instead of the global random number generators. test: not used (kept from the original
-        code). '''
+        (see above) instead of the global random number generators. mask_missing_images: mark the products
+        without an image (see above). test: not used (kept from the original code). '''
         assert image_insts or src_insts
         assert tgt_format in TGT_FORMATS
         if isinstance(transform, _SeededTransform) and seed is None:
@@ -297,7 +312,7 @@ class DataLoader(object):
         self._tgt_word2idx = tgt_word2idx
         self._dataset = _Instances(image_dir, transform, image_insts or None, src_insts or None, tgt_insts or None,
                                    seed)
-        self._collate = _Collate(tgt_format)
+        self._collate = _Collate(tgt_format, mask_missing_images)
         self._num_workers = num_workers if image_insts else 0
         self._batches = batches
         self._seed = seed
@@ -349,11 +364,14 @@ class DataLoader(object):
                 torch.set_rng_state(state)
         else:  # in this process, like the original code
             loader = (self._collate([self._dataset[i] for i in batch]) for batch in batches)
-        for indices, image, src, tgt in loader:
+        for indices, image, present, src, tgt in loader:
             if self.cuda:
                 image = image.cuda(non_blocking=True) if image is not None else None
+                present = present.cuda(non_blocking=True) if present is not None else None
                 src = src.cuda(non_blocking=True) if src is not None else None
                 tgt = tgt.cuda(non_blocking=True) if tgt is not None else None
+            if present is not None:
+                image = MaskedImages(image, present)
             yield indices, image, src, tgt
         self._epoch += 1
         if self._need_shuffle and self._seed is None:

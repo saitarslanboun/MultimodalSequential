@@ -1,0 +1,37 @@
+{
+  "description": "MultiClass on the H&M data split with -seed, image input",
+  "model_type": "multiclass",
+  "modality": "img",
+  "missing_values": [
+    "Unknown",
+    "Undefined",
+    "undefined"
+  ],
+  "hm": {
+    "valid_size": 5000,
+    "test_size": 5000,
+    "sp_vocab_size": 4000,
+    "distinct_unk": true
+  },
+  "train": {
+    "batch_size": 32,
+    "d_model": 1024,
+    "n_warmup_steps": 4000,
+    "save_mode": "best",
+    "patience": 3,
+    "select_by": "chain_accuracy",
+    "label_smoothing": 0.1,
+    "train_crop": "resize_random_crop",
+    "valid_crop": "center_crop",
+    "frozen_resnet": true,
+    "mask_missing_images": true
+  },
+  "translate": {
+    "batch_size": 32,
+    "test_crop": "center_crop",
+    "deterministic": true
+  },
+  "evaluate": {
+    "n_attributes": 11
+  }
+}
