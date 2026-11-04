@@ -107,10 +107,12 @@ def main():
         transform = image_transform(opt.test_crop, opt.crop_size)
         if opt.test_crop != 'center_crop':  # the random crops and flips, seeded per product
             transform = PredictionSeededTransform(transform)
+    # A model trained with -mask_missing_images also leaves out the missing images here.
     test_data = DataLoader(
         transform, opt.image_dir, preprocess_data['dict'].get('src'), tgt_dict, image_insts=test_img_insts,
         src_insts=test_src_insts, cuda=opt.cuda, shuffle=False, num_workers=opt.num_workers, seed=seed,
-        batches=make_batches(model_type, test_src_insts, n_insts, opt.batch_size))
+        batches=make_batches(model_type, test_src_insts, n_insts, opt.batch_size),
+        mask_missing_images=getattr(translator.model_opt, 'mask_missing_images', False))
 
     chain = ChainFormatter(model_type, tgt_dict, opt.check_chain)
     if model_type not in ('sequential', 'multiclass'):

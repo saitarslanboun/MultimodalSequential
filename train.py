@@ -13,6 +13,7 @@ import torch.nn.functional as F
 import torch.optim as optim
 from tqdm import tqdm
 
+import hm_data
 import kaggle_data
 import rnmtplus.Constants as Constants
 from DataLoader import CROPS, DataLoader, SeededRandomTransform, check_image_dir, image_transform
@@ -172,6 +173,11 @@ def log_line(epoch, loss, accu, opt, chain_accuracy=None):
     return line + '\n'
 
 
+def seeded_split(opt):
+    ''' Whether the data is the Kaggle or H&M data split with -seed (-kaggle_dir, -hm_dir). '''
+    return bool(getattr(opt, 'kaggle_dir', None) or getattr(opt, 'hm_dir', None))
+
+
 class ChainAccuracy(object):
     ''' The full-chain accuracy of the model's predictions for the validation set (-select_by chain_accuracy):
     the classifiers' highest-scoring values, the greedy decoding of the sequential model, as translate.py
@@ -185,8 +191,9 @@ class ChainAccuracy(object):
         self.loader = DataLoader(
             transform, opt.image_dir, data['dict'].get('src'), data['dict']['tgt'], image_insts=img_insts,
             src_insts=src_insts, cuda=opt.cuda, shuffle=False, num_workers=opt.num_workers,
-            seed=opt.seed if opt.kaggle_dir else None,
-            batches=make_batches(opt.model_type, src_insts, len(self.gold), opt.batch_size))
+            seed=opt.seed if seeded_split(opt) else None,
+            batches=make_batches(opt.model_type, src_insts, len(self.gold), opt.batch_size),
+            mask_missing_images=getattr(opt, 'mask_missing_images', False))
         check_chain = not opt.no_check_chain
         self.translator = Translator.from_model(
             model, opt, argparse.Namespace(decode_steps=opt.decode_steps, check_chain=check_chain, amp=opt.amp),
@@ -284,11 +291,11 @@ def main():
     parser = argparse.ArgumentParser(description='train.py')
     parser.add_argument('-model_type', required=True, choices=MODEL_TYPES)
     parser.add_argument('-modality', choices=MODALITIES, help='default: the inputs in -data')
-    parser.add_argument('-data', help='data.pt (preprocess.py); or -kaggle_dir')
+    parser.add_argument('-data', help='data.pt (preprocess.py); or -kaggle_dir or -hm_dir')
     parser.add_argument('-image_dir',
-                        help='the image directory (image models; default with -kaggle_dir: its images/), or the '
-                             'images resized in advance by resize_images.py, for the crops that resize first '
-                             '(center_crop, resize_random_crop): the same images, read faster')
+                        help='the image directory (image models; default with -kaggle_dir or -hm_dir: its '
+                             'images/), or the images resized in advance by resize_images.py, for the crops that '
+                             'resize first (center_crop, resize_random_crop): the same images, read faster')
 
     parser.add_argument('-epoch', type=int, default=500)
     parser.add_argument('-batch_size', type=int, default=32)
@@ -299,13 +306,13 @@ def main():
     parser.add_argument('-dropout', type=float, default=0.1)
     parser.add_argument('-crop_size', type=int, default=224, help='size for randomly cropping images')
     parser.add_argument('-train_crop', choices=sorted(CROPS),
-                        help='the crop of the images in training (default: random_crop; with -kaggle_dir '
-                             'random_resized_crop, as in the paper\'s Kaggle runs). resize_random_crop: resize '
+                        help='the crop of the images in training (default: random_crop; with -kaggle_dir or '
+                             '-hm_dir random_resized_crop, as in the paper\'s Kaggle runs). resize_random_crop: resize '
                              'the shorter side to 256 (for -crop_size 224) and crop at random, which keeps '
                              'most of the image, unlike random_resized_crop (8%% to 100%% of it)')
     parser.add_argument('-valid_crop', choices=sorted(CROPS),
                         help='the crop of the images in validation (default: -train_crop, as in the paper\'s '
-                             'runs; with -kaggle_dir center_crop)')
+                             'runs; with -kaggle_dir or -hm_dir center_crop)')
     parser.add_argument('-no_proj1_bias', action='store_true',
                         help='attentive models: no bias in the first projection (Rakuten text+image)')
     parser.add_argument('-unused_slf_attention', action='store_true',
@@ -315,6 +322,11 @@ def main():
                         help='the baselines leave out the padding of the titles in the average pooling and in '
                              'the attention, as the attention of the sequential model does (the original code '
                              'included it)')
+    parser.add_argument('-mask_missing_images', action='store_true',
+                        help='the models leave out the image of a product without one (the name None, or an image '
+                             'that cannot be read): zero image features, no attention to them, no image context in '
+                             'the sequential decoder; the product keeps its text and targets. Default: a zero image, '
+                             'as in the original code')
     parser.add_argument('-frozen_resnet', action='store_true',
                         help='keep the pretrained ResNet in evaluation mode during training, so that its '
                              'BatchNorm layers keep the ImageNet statistics and the whole ResNet stays as '
@@ -350,10 +362,10 @@ def main():
                         help='the seed of all random numbers: Python\'s string hashes (PYTHONHASHSEED), random, '
                              'NumPy and PyTorch on the CPU and GPUs (the initial weights, dropout, the order of '
                              'the training data, the random image crops and flips, the image loading processes); '
-                             'with -kaggle_dir also the split and the SentencePiece model')
+                             'with -kaggle_dir or -hm_dir also the split and the SentencePiece model')
     parser.add_argument('-deterministic', action='store_true',
                         help='deterministic algorithms (slower) instead of the fastest ones: cuDNN\'s, and in '
-                             'PyTorch 1.8 and later those of all operations; always on with -kaggle_dir')
+                             'PyTorch 1.8 and later those of all operations; always on with -kaggle_dir or -hm_dir')
     parser.add_argument('-tf32', action='store_true',
                         help='allow TensorFloat-32 on Ampere and newer GPUs: faster, but less precise than the '
                              'float32 of the experiments')
@@ -363,9 +375,10 @@ def main():
                              'GPUs with tensor cores, but other numbers than float32 (PyTorch 1.10 or later)')
 
     kaggle = parser.add_argument_group(
-        'the Kaggle data split with -seed (instead of -data; see kaggle_data.py)')
+        'the Kaggle or H&M data split with -seed (instead of -data; see kaggle_data.py and hm_data.py)')
     kaggle.add_argument('-kaggle_dir', help='the Kaggle Fashion Product Images data: styles.csv and images/')
-    kaggle.add_argument('-kaggle_data_dir',
+    kaggle.add_argument('-hm_dir', help='the H&M Personalized Fashion Recommendations data: articles.csv and images/')
+    kaggle.add_argument('-kaggle_data_dir', '-split_data_dir', dest='kaggle_data_dir',
                         help='where the split, the SentencePiece model, the vocabularies and data.pt are written '
                              '(default: data/ next to the -save_model directory)')
     kaggle.add_argument('-valid_size', type=float, default=5000,
@@ -384,22 +397,23 @@ def main():
                              'with wrong attributes')
 
     opt = parser.parse_args()
-    if (opt.data is None) == (opt.kaggle_dir is None):
-        parser.error('give either -data or -kaggle_dir')
+    if sum(x is not None for x in (opt.data, opt.kaggle_dir, opt.hm_dir)) != 1:
+        parser.error('give one of -data, -kaggle_dir and -hm_dir')
     if not 0 <= opt.seed < 2 ** 32:
         parser.error('-seed must be between 0 and 2**32 - 1')
     compat.seed_python_hash(opt.seed)  # runs the script again if PYTHONHASHSEED is not the seed
-    if opt.kaggle_dir is not None:
+    split_dir = opt.kaggle_dir or opt.hm_dir  # the Kaggle or H&M data, split with -seed
+    if split_dir is not None:
         if opt.kaggle_data_dir is None:
             if opt.save_model is None:
-                parser.error('-kaggle_dir needs -kaggle_data_dir or -save_model')
+                parser.error('-kaggle_dir and -hm_dir need -kaggle_data_dir or -save_model')
             opt.kaggle_data_dir = os.path.join(os.path.dirname(os.path.abspath(opt.save_model)), 'data')
-        opt.image_dir = opt.image_dir or os.path.join(opt.kaggle_dir, 'images')
+        opt.image_dir = opt.image_dir or os.path.join(split_dir, 'images')
         opt.deterministic = True
     if opt.train_crop is None:
-        opt.train_crop = 'random_resized_crop' if opt.kaggle_dir else 'random_crop'
+        opt.train_crop = 'random_resized_crop' if split_dir else 'random_crop'
     if opt.valid_crop is None:
-        opt.valid_crop = 'center_crop' if opt.kaggle_dir else opt.train_crop
+        opt.valid_crop = 'center_crop' if split_dir else opt.train_crop
     opt.cuda = not opt.no_cuda
     if opt.amp and not (opt.cuda and compat.amp_supported()):
         parser.error('-amp needs a GPU and PyTorch 1.10 or later')
@@ -410,10 +424,10 @@ def main():
     compat.set_tf32(opt.tf32)
 
     #========= Loading Dataset =========#
-    if opt.kaggle_dir:
-        opt.data = kaggle_data.prepare(opt.kaggle_dir, opt.kaggle_data_dir, opt.model_type, opt.seed,
-                                       opt.valid_size, opt.test_size, opt.sp_vocab_size, opt.distinct_unk,
-                                       opt.missing_values, opt.exclude_ids)
+    if split_dir:
+        prepare = kaggle_data.prepare if opt.kaggle_dir else hm_data.prepare
+        opt.data = prepare(split_dir, opt.kaggle_data_dir, opt.model_type, opt.seed, opt.valid_size, opt.test_size,
+                           opt.sp_vocab_size, opt.distinct_unk, opt.missing_values, opt.exclude_ids)
     data = compat.torch_load(opt.data)
     opt.max_token_seq_len = data['settings'].max_token_seq_len
     has_image, has_text = 'img' in data['train'], 'src' in data['train']
@@ -435,12 +449,12 @@ def main():
     tgt_dict = data['dict']['tgt']
 
     #========= Preparing DataLoader =========#
-    # With -kaggle_dir, the random crops and flips are drawn from the seed, the epoch and the product
+    # With -kaggle_dir or -hm_dir, the random crops and flips are drawn from the seed, the epoch and the product
     # (SeededRandomTransform), the training data is shuffled with the seed, and the image loading processes
     # are seeded from it. For the data of the paper's experiments, these random numbers come from the
     # generators seeded with -seed, as in the original code: the same seed gives the same crops with the
     # same -num_workers.
-    seed = opt.seed if opt.kaggle_dir else None
+    seed = opt.seed if split_dir else None
 
     def transform(crop):
         if not uses_image(opt.modality):
@@ -458,7 +472,7 @@ def main():
             image_insts=data[split]['img'] if uses_image(opt.modality) else None,
             src_insts=data[split]['src'] if uses_text(opt.modality) else None,
             tgt_insts=data[split]['tgt'], tgt_format=tgt_format, batch_size=batch_size, shuffle=shuffle,
-            cuda=opt.cuda, num_workers=opt.num_workers, seed=seed)
+            cuda=opt.cuda, num_workers=opt.num_workers, seed=seed, mask_missing_images=opt.mask_missing_images)
 
     training_data = loader('train', opt.batch_size, True, train_transform)
     validation_data = loader('valid', int(opt.batch_size / 3), False, valid_transform)

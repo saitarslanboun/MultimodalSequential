@@ -23,14 +23,17 @@ implements all models; the settings of each experiment are in a file in `experim
 ├── evaluate.py       computes the error rates of the predictions
 ├── DataLoader.py     batches of images, titles and attribute chains
 ├── kaggle_data.py    splits the Kaggle data with a seed and prepares it (train.py -kaggle_dir)
+├── hm_data.py        the same for the H&M data (train.py -hm_dir)
 ├── resize_images.py  resizes the images in advance, for faster training and prediction
 ├── rnmtplus/         the models (Models.py), prediction (Translator.py), RNMT+ layers and attention
 ├── experiments/      the settings of the 42 experiments: <dataset>/<input>/<model>.json;
 │                     <dataset>_fixed/: the same with the fixes for a fair comparison;
-│                     kaggle_seeded/: the Kaggle experiments on a split drawn with a seed, with these fixes
+│                     kaggle_seeded/: the Kaggle experiments on a split drawn with a seed, with these fixes;
+│                     hm_seeded/: the same experiments on the H&M data
 ├── analysis/         the analysis scripts of the paper
 └── tests/            smoke_test.py: an end-to-end run of every experiment on synthetic data;
-                      reproducibility_test.py: the same seed gives the same results
+                      reproducibility_test.py: the same seed gives the same results;
+                      masking_test.py: the models leave out the images of products without one
 ```
 
 ## Models
@@ -169,6 +172,76 @@ improved for three epochs and keeps the best checkpoint. Runs with the same seed
 on the same type of GPU and the same software versions give the same files, weights, logs and predictions;
 another GPU type or other versions of PyTorch, Pillow or SentencePiece can give other numbers. The five
 products of the Kaggle data without an image get a blank image, as in the paper's runs.
+
+## The H&M data split with a seed
+
+The settings in `experiments/hm_seeded/` run the 18 experiments on the article catalogue of the
+[H&M Personalized Fashion Recommendations](https://www.kaggle.com/competitions/h-and-m-personalized-fashion-recommendations)
+data (its use is subject to the competition's rules), split with a seed as the Kaggle data is (previous
+section): the same steps, options and fixes.
+
+```bash
+S=experiments/hm_seeded/txt+img/sequential.json
+H=/data/hm   # the H&M data: articles.csv and images/
+W=work/hm_seeded/txt+img/sequential/seed1
+python resize_images.py -input $H/images -output $H/images_256    # once (optional)
+python run.py $S train     -data_dir $H -work_dir $W -seed 1 -image_dir $H/images_256
+python run.py $S translate -data_dir $H -work_dir $W -image_dir $H/images_256    # with model.best.chkpt
+python run.py $S evaluate  -data_dir $H -work_dir $W
+```
+
+`train` (`train.py -hm_dir $H -seed 1`) prepares the data in `$W/data` with `hm_data.py`, from the 105,542
+articles of `articles.csv`:
+
+- the text: the name and the description as they are in `articles.csv`, `<prod_name>. <detail_desc>`, or the
+  name alone for the 416 articles without a description;
+- the attribute chain: the names of 11 attributes from coarse to fine, with spaces in a name replaced by `_`;
+- the image: `images/<first three digits of the id>/<id>.jpg`, or `None` for the 442 articles without one;
+- the split, the SentencePiece model, the vocabularies and `data.pt` as for the Kaggle data: 5,000 test and
+  5,000 validation articles, each article on its own (the colour variants of a product can fall in different
+  sets).
+
+| # | Attribute | Column of `articles.csv` | Values |
+|---|---|---|---|
+| 1 | index group | `index_group_name` | 5 |
+| 2 | index | `index_name` | 10 |
+| 3 | product group | `product_group_name` | 19 |
+| 4 | garment group | `garment_group_name` | 21 |
+| 5 | section | `section_name` | 56 |
+| 6 | department | `department_name` | 250 |
+| 7 | product type | `product_type_name` | 131 |
+| 8 | lightness | `perceived_colour_value_name` | 8 |
+| 9 | perceived colour | `perceived_colour_master_name` | 20 |
+| 10 | colour | `colour_group_name` | 50 |
+| 11 | pattern | `graphical_appearance_name` | 30 |
+
+The data gives no order of the attributes (its columns run partly from fine to coarse: the product type before
+the product group, the department before the index). The order above was chosen from the data:
+
+1. An attribute that another one determines comes before it: the index group (determined by the index, the
+   section and the department), the index, section and garment group (by the department) and the product group
+   (by the product type).
+2. Of the orders that keep this rule, the chain adds the least information at each step: the sum of the
+   entropies of its prefixes over the articles is the lowest of all orders (an exact search over the 2^11 sets
+   of attributes). The same order results on two random halves of the products, with the codes instead of the
+   names, and without the articles that have a placeholder.
+
+A few names stand for several H&M codes (22 department names, the section `Ladies Other`, the product type
+`Umbrella`); the attributes before them in the chain tell them apart.
+
+`Unknown`, `Undefined` and `undefined` are H&M's placeholders for an unknown value: as `NA` and `None` for the
+Kaggle data, they are missing values (`missing_values` in the settings), which are not targets and not scored.
+4.5% of the articles have at least one, mostly an unknown garment group. The colour `Other` is a colour of its
+own.
+
+The 442 articles without an image stay in the data with their text and targets, but the image models leave out
+their image (`-mask_missing_images` in the settings): its features are zero, the attention of the attentive
+baselines leaves out its regions, and the Sequential decoder gets no image context. An image file that cannot be
+read or transformed counts as missing too: the one grayscale image of the data cannot be normalized, as in the
+other pipelines. Without the option, as for the other datasets, a missing image is a blank image.
+
+`resize_images.py` keeps the subdirectories of `images/`: the copies are `images_256/<digits>/<id>.png`. Most
+photos are 1166 × 1750.
 
 ## Settings for a fair comparison
 
@@ -365,6 +438,17 @@ and `experiments/kaggle_seeded/` change them: see [Settings for a fair compariso
   seed 1 on a V100 with 6 CPUs gives the same data, weights, logs and test predictions with the original
   images and with the copies, in 4.0 instead of 9.9 minutes (training 3.1 instead of 7.7 minutes, the test
   predictions 47 instead of 99 seconds).
+- **The H&M data** (`hm_data.py`, `experiments/hm_seeded/`, `-mask_missing_images`): on both stacks,
+  `tests/smoke_test.py` passes for the 18 H&M and the 18 seeded Kaggle settings (on the new stack for all 120
+  settings files), `tests/reproducibility_test.py` for these 36 settings (the 24 image settings also with the
+  resized images), and `tests/masking_test.py` for the 12 image models: with all images present, the outputs
+  are those of a plain batch of images, bit for bit, and the image of an absent product changes neither the
+  scores nor the predictions. The 18 seeded Kaggle settings give the same data, weights, logs and predictions
+  as before these changes. On the real data, seed 1 gives 95,542 training, 5,000 validation and 5,000 test
+  articles, whose texts and chains are those of `articles.csv`; all 105,100 resized copies give the same tensors
+  as the originals (the one grayscale image is missing in both). One epoch on a V100 with 6 CPUs trains in 17.3
+  minutes for the text+image Sequential model (6.7 GB of GPU memory), 16.0 for text+image MultiClass (5.2 GB)
+  and 5.0 for the image-only Attentive MultiTask model (1.2 GB).
 
 ## Requirements
 
