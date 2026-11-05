@@ -24,16 +24,20 @@ implements all models; the settings of each experiment are in a file in `experim
 ├── DataLoader.py     batches of images, titles and attribute chains
 ├── kaggle_data.py    splits the Kaggle data with a seed and prepares it (train.py -kaggle_dir)
 ├── hm_data.py        the same for the H&M data (train.py -hm_dir)
+├── fashiongen_export.py  converts the FashionGen release (HDF5) into one row per product and image files
+├── fashiongen_data.py    prepares the FashionGen data with its fixed test set (train.py -fashiongen_dir)
 ├── resize_images.py  resizes the images in advance, for faster training and prediction
 ├── rnmtplus/         the models (Models.py), prediction (Translator.py), RNMT+ layers and attention
 ├── experiments/      the settings of the 42 experiments: <dataset>/<input>/<model>.json;
 │                     <dataset>_fixed/: the same with the fixes for a fair comparison;
 │                     kaggle_seeded/: the Kaggle experiments on a split drawn with a seed, with these fixes;
-│                     hm_seeded/: the same experiments on the H&M data
+│                     hm_seeded/: the same experiments on the H&M data;
+│                     fashiongen_seeded/: and on the FashionGen data, with all views of a product
 ├── analysis/         the analysis scripts of the paper
 └── tests/            smoke_test.py: an end-to-end run of every experiment on synthetic data;
                       reproducibility_test.py: the same seed gives the same results;
-                      masking_test.py: the models leave out the images of products without one
+                      masking_test.py: the models leave out the images of products without one, and
+                      the views a product does not have; fashiongen_export_test.py: the FashionGen export
 ```
 
 ## Models
@@ -243,6 +247,71 @@ other pipelines. Without the option, as for the other datasets, a missing image 
 `resize_images.py` keeps the subdirectories of `images/`: the copies are `images_256/<digits>/<id>.png`. Most
 photos are 1166 × 1750.
 
+## The FashionGen data with its test set
+
+The settings in `experiments/fashiongen_seeded/` run the 18 experiments on the challenge release of
+[FashionGen](https://arxiv.org/abs/1806.08317) (`fashiongen_256_256_train.h5` and
+`fashiongen_256_256_validation.h5`; its use is subject to the terms of the release), with the steps, options and
+fixes of the Kaggle data, except the split: the release's validation file is a fixed test set, and the seed draws
+the validation set from its training file. The image models use all the views of a product.
+
+```bash
+S=experiments/fashiongen_seeded/txt+img/sequential.json
+F=/data/fashiongen   # the export: products.csv and images/
+W=work/fashiongen_seeded/txt+img/sequential/seed1
+python fashiongen_export.py -h5_dir /data -output $F    # once; needs h5py
+python run.py $S train     -data_dir $F -work_dir $W -seed 1
+python run.py $S translate -data_dir $F -work_dir $W    # with model.best.chkpt
+python run.py $S evaluate  -data_dir $F -work_dir $W
+```
+
+The release has one row per photo: a product has one to six photos, one per view (`input_pose`, `id_gridfs_1` to
+`id_gridfs_6`), and each of its rows repeats its text and attributes; 89 products have repeated rows, 395 in all
+(their views stored twice, a few three times), with the same photos. `fashiongen_export.py` writes one row per
+product to `products.csv` (the
+fields of the release without the `input_` prefix, the file of the release in `split`, the views in `poses`) and
+each view once to `images/<product_id>/<pose>.png` (256 × 256, saved without loss and read back). It stops if the
+rows of a product disagree or a repeated view is another photo. The text is UTF-8 or, where it is not, Latin-1
+(brands such as `Chloé`); it is written unchanged.
+
+`train` (`train.py -fashiongen_dir $F -seed 1`) prepares the data in `$W/data` with `fashiongen_data.py`, from the
+67,666 products of `products.csv`:
+
+- the text: the name and the description as they are in the release, `<name>. <description>`; only a line break
+  in it becomes a space (in 594 descriptions, mostly `\r\n`), since the data files hold one product per line.
+  `concat_description` is not used: it also describes the other items of the photographed outfit;
+- the attribute chain: the 6 attributes from coarse to fine (table below), with spaces in a value replaced by `_`;
+  the release has no missing values;
+- the image: one name per view slot, `<product_id>/<pose>.png`, or `None` for a view the product does not have.
+  48,324 products have 4 views, 16,725 five or six, and 2,617 one to three;
+- the split: the 7,519 products of the release's validation file are the test set; the seed draws 5,000
+  validation products from the 60,147 of its training file, and the other 55,147 are the training set. The
+  SentencePiece model, the vocabularies and `data.pt` are made as for the Kaggle data.
+
+| # | Attribute | Field of the release | Values |
+|---|---|---|---|
+| 1 | department | `input_department` | 4 |
+| 2 | gender | `input_gender` | 2 |
+| 3 | category | `input_category` | 48 |
+| 4 | subcategory | `input_subcategory` | 121 |
+| 5 | season | `input_season` | 10 |
+| 6 | brand | `input_brand` | 570 |
+
+The order was chosen as for the H&M data: the category determines the department, which comes first; of the
+orders that keep this rule, the prefixes of the chain have the lowest summed entropy over the products of the
+release's training file. The same order results on two random halves of them and on all products; gender before
+department would add 0.02 bits. 9 subcategory names stand under two categories (`SHIRTS` under `SHIRTS` and
+`TOPS`, the jewellery under `JEWELRY` and `FINE JEWELRY`, ...); the category before them in the chain tells them
+apart.
+
+The image models see all views of a product (`"max_views": 6` in the settings, `train.py -max_views`). The
+ResNet-50 encodes each view, and the image features are the 196 regions of every view, one view after the other,
+with a learned embedding of the view slot (one per pose; zero at the start) added to its regions. The Sequential
+decoder and the attentive baselines attend to the regions of the views the product has; MultiClass, Binary
+MultiLabel and MultiTask average them. With `max_views` 1, the default, a product has one image, as for the other
+datasets. The photos are 256 × 256 already: the resizing of `resize_random_crop` and `center_crop` (shorter
+side 256) leaves them as they are.
+
 ## Settings for a fair comparison
 
 The settings in `experiments/<dataset>/` reproduce the paper's runs, with training details that differ between
@@ -304,7 +373,8 @@ The data is not part of this repository.
 
 Each split is a set of parallel text files with one line per item:
 
-- `*.img`: image file name, relative to `-image_dir`;
+- `*.img`: image file name, relative to `-image_dir` (FashionGen: one name per view slot, separated by tabs,
+  `None` for a view the product does not have);
 - `*.tit`, `*.enc.tit`: product title, tokenised with SentencePiece;
 - `*.lbl`: the attribute chain, values separated by spaces (multi-word values joined with `_`).
 
@@ -449,6 +519,20 @@ and `experiments/kaggle_seeded/` change them: see [Settings for a fair compariso
   as the originals (the one grayscale image is missing in both). One epoch on a V100 with 6 CPUs trains in 17.3
   minutes for the text+image Sequential model (6.7 GB of GPU memory), 16.0 for text+image MultiClass (5.2 GB)
   and 5.0 for the image-only Attentive MultiTask model (1.2 GB).
+- **The FashionGen data** (`fashiongen_export.py`, `fashiongen_data.py`, `experiments/fashiongen_seeded/`,
+  `-max_views`): `tests/fashiongen_export_test.py` passes, and the export of the release has 67,666 products and
+  292,623 view images, each read back equal to its photo in the HDF5 files. On both stacks,
+  `tests/smoke_test.py` passes for the 18 FashionGen settings (on the new stack for all 138 settings files),
+  `tests/reproducibility_test.py` for them (on the new stack also for the 36 seeded Kaggle and H&M settings), and
+  `tests/masking_test.py` for the 12 image models with views: the image in the slot of an absent view changes
+  neither the scores nor the predictions, a present view and its slot do, and with the view embedding at zero a
+  product with one view gets the scores of the model for one image (compared in float64). The 18 seeded Kaggle
+  and the 18 H&M settings give the same data, weights, logs and predictions as before these changes. On the real
+  data, seed 1 gives 55,147 training, 5,000 validation and 7,519 test products (those of the release's
+  validation file), whose texts, chains and views are those of the export; the resizing of `center_crop` and
+  `resize_random_crop` leaves the 256 × 256 photos as they are. One epoch on a V100 with 6 CPUs trains in 12.9
+  minutes for the text+image Sequential model (15.7 GB of GPU memory, on a 16 GB V100) and 5.2 for the image-only
+  Attentive MultiTask model (13.8 GB), with the same data, weights, logs and test predictions on another node.
 
 ## Requirements
 
@@ -457,7 +541,8 @@ the CPU, slowly). Tested with Python 3.7, PyTorch 1.1.0, torchvision 0.3.0 and P
 2019, when the experiments were run with Python 3.6 and PyTorch 1.x), and with Python 3.12, PyTorch 2.14.1,
 torchvision 0.29.1 and Pillow 13.0.0, which decodes some JPEG images slightly differently (see
 [Verification](#verification)). The Kaggle data split with a seed needs SentencePiece (`pip install
-sentencepiece`), the heat-map script OpenCV and scikit-image, `analysis/label_stats.py frequency` matplotlib.
+sentencepiece`), the FashionGen export h5py, the heat-map script OpenCV and scikit-image,
+`analysis/label_stats.py frequency` matplotlib.
 `python tests/smoke_test.py` runs every experiment on synthetic data, to check an installation, and
 `python tests/reproducibility_test.py` checks that the same seed gives the same results there.
 

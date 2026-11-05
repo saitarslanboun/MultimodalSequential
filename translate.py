@@ -6,8 +6,8 @@ import os
 import torch
 from tqdm import tqdm
 
-from DataLoader import CROPS, DataLoader, PredictionSeededTransform, check_image_dir, image_transform
-from preprocess import convert_instance_to_idx_seq, read_instances_from_file
+from DataLoader import CROPS, DataLoader, PredictionSeededTransform, check_image_dir, image_transform, view_names
+from preprocess import convert_instance_to_idx_seq, read_image_instances_from_file, read_instances_from_file
 from rnmtplus import compat
 from rnmtplus.Models import MODEL_TYPES, uses_image, uses_text
 from rnmtplus.Translator import ChainFormatter, Translator, make_batches
@@ -95,8 +95,12 @@ def main():
     preprocess_settings = preprocess_data['settings']
     tgt_dict = preprocess_data['dict']['tgt']
     test_img_insts = test_src_insts = None
+    max_views = getattr(translator.model_opt, 'max_views', 1)
     if uses_image(modality):
-        test_img_insts = read_instances_from_file(opt.img, preprocess_settings.max_word_seq_len)
+        test_img_insts = read_image_instances_from_file(opt.img)  # whole lines, as in data.pt
+        n_views = max(len(view_names(inst)) for inst in test_img_insts)
+        if n_views > max_views:
+            parser.error('{} names up to {} views; the model has {} view slots'.format(opt.img, n_views, max_views))
     if uses_text(modality):
         test_src_word_insts = read_instances_from_file(opt.src, preprocess_settings.max_word_seq_len)
         test_src_insts = convert_instance_to_idx_seq(test_src_word_insts, preprocess_data['dict']['src'])
@@ -107,12 +111,13 @@ def main():
         transform = image_transform(opt.test_crop, opt.crop_size)
         if opt.test_crop != 'center_crop':  # the random crops and flips, seeded per product
             transform = PredictionSeededTransform(transform)
-    # A model trained with -mask_missing_images also leaves out the missing images here.
+    # A model trained with -mask_missing_images also leaves out the missing images here, and one trained with
+    # -max_views the views a product does not have.
     test_data = DataLoader(
         transform, opt.image_dir, preprocess_data['dict'].get('src'), tgt_dict, image_insts=test_img_insts,
         src_insts=test_src_insts, cuda=opt.cuda, shuffle=False, num_workers=opt.num_workers, seed=seed,
         batches=make_batches(model_type, test_src_insts, n_insts, opt.batch_size),
-        mask_missing_images=getattr(translator.model_opt, 'mask_missing_images', False))
+        mask_missing_images=getattr(translator.model_opt, 'mask_missing_images', False), max_views=max_views)
 
     chain = ChainFormatter(model_type, tgt_dict, opt.check_chain)
     if model_type not in ('sequential', 'multiclass'):

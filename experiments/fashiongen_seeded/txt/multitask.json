@@ -1,0 +1,27 @@
+{
+  "description": "MultiTask on the FashionGen data (its test set; validation drawn with -seed), text input",
+  "model_type": "multitask",
+  "modality": "txt",
+  "fashiongen": {
+    "valid_size": 5000,
+    "sp_vocab_size": 4000,
+    "distinct_unk": true
+  },
+  "train": {
+    "batch_size": 32,
+    "d_model": 1024,
+    "n_warmup_steps": 4000,
+    "save_mode": "best",
+    "patience": 3,
+    "select_by": "chain_accuracy",
+    "label_smoothing": 0.1,
+    "mask_padding": true
+  },
+  "translate": {
+    "batch_size": 64,
+    "deterministic": true
+  },
+  "evaluate": {
+    "n_attributes": 6
+  }
+}

@@ -81,7 +81,7 @@ class Translator(object):
             model_opt.model_type = architecture['model_type'] or getattr(opt, 'model_type', None)
             if model_opt.model_type is None:
                 raise ValueError('The checkpoint does not record its model type; give it with -model_type.')
-        for name in ('modality', 'proj1_bias', 'unused_slf_attention'):
+        for name in ('modality', 'proj1_bias', 'unused_slf_attention', 'max_views'):
             setattr(model_opt, name, architecture[name])
         self.model_opt = model_opt
 
