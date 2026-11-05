@@ -20,6 +20,13 @@ With mask_missing_images (train.py -mask_missing_images), a product without an i
 image that cannot be read or transformed) is marked absent: the batches then hold MaskedImages (the images and
 their presence), and the models leave out the image of an absent product, which keeps its text and targets.
 Without it, such a product gets a zero image, as in the original code.
+
+With max_views > 1 (train.py -max_views, FashionGen), a product has several views: its line of an .img file
+names one image per view slot, in slot order and separated by tabs (a name can have spaces), or None for a view
+it does not have (the slots after the last name are absent too). Its image is then max_views x 3 x size x
+size, the batches always hold MaskedImages with the presence of every view (batch x views), and the models leave
+out the views that are not present. With a seed, the random crop and flip of each view are drawn with a
+random.Random seeded with the seed, the epoch, the index of the product and the slot.
 '''
 
 import functools
@@ -219,6 +226,32 @@ def read_image(image_dir, img_inst, transform, resized=False):
         return torch.zeros((3, ZERO_IMAGE_SIZE, ZERO_IMAGE_SIZE)), False
 
 
+VIEW_SEPARATOR = '\t'  # between the view slots of a line of an .img file
+
+
+def view_names(img_inst):
+    ''' The image names of an image instance: a line of an .img file (data.pt, translate.py) split at its tabs,
+    or the tokens of preprocess.read_instances_from_file without <BOS> and <EOS>. '''
+    if type(img_inst) is list:
+        return img_inst[1:-1]
+    return img_inst.split(VIEW_SEPARATOR)
+
+
+def read_views(image_dir, img_inst, view_transform, max_views, resized=False):
+    ''' The transformed views of a product (max_views x 3 x size x size) and whether each is present: the names
+    of img_inst are its view slots in order (None for a view it does not have), the slots after them are absent
+    too, and an absent view is a zero image (read_image). view_transform(slot): the transformation of a slot. '''
+    names = view_names(img_inst)
+    if len(names) > max_views:
+        raise ValueError('{} views, more than max_views {}: {}'.format(len(names), max_views, ' '.join(names)))
+    views, present = [], []
+    for slot in range(max_views):
+        image, ok = read_image(image_dir, names[slot] if slot < len(names) else 'None', view_transform(slot), resized)
+        views.append(image)
+        present.append(ok)
+    return torch.stack(views), present
+
+
 def load_image(image_dir, img_inst, transform, resized=False):
     ''' The transformed image; a zero image if the name is "None" or the file cannot be read or transformed. '''
     return read_image(image_dir, img_inst, transform, resized)[0]
@@ -232,7 +265,7 @@ def pad_to_longest(insts):
 
 class _Instances(torch.utils.data.Dataset):
 
-    def __init__(self, image_dir, transform, image_insts, src_insts, tgt_insts, seed=None):
+    def __init__(self, image_dir, transform, image_insts, src_insts, tgt_insts, seed=None, max_views=1):
         self.image_dir = image_dir
         self.resized = image_insts is not None and resized_record(image_dir) is not None
         self.transform = transform
@@ -240,14 +273,25 @@ class _Instances(torch.utils.data.Dataset):
         self.src_insts = src_insts
         self.tgt_insts = tgt_insts
         self.seed = seed
+        self.max_views = max_views
         self.epoch = 0  # set by the DataLoader before each epoch
+
+    def _view_transform(self, index, slot):
+        ''' The transformation of a view of the product: seeded with the seed, the epoch, the index and the slot. '''
+        if isinstance(self.transform, _SeededTransform):
+            rng = random.Random('{} {} {} {}'.format(self.seed, self.epoch, index, slot))
+            return functools.partial(self.transform, rng=rng)
+        return self.transform
 
     def __len__(self):
         return len(self.src_insts if self.src_insts is not None else self.image_insts)
 
     def __getitem__(self, index):
         image = present = None
-        if self.image_insts is not None:
+        if self.image_insts is not None and self.max_views > 1:
+            image, present = read_views(self.image_dir, self.image_insts[index],
+                                        functools.partial(self._view_transform, index), self.max_views, self.resized)
+        elif self.image_insts is not None:
             transform = self.transform
             if isinstance(transform, _SeededTransform):
                 rng = random.Random('{} {} {}'.format(self.seed, self.epoch, index))
@@ -260,15 +304,17 @@ class _Instances(torch.utils.data.Dataset):
 
 class _Collate(object):
 
-    def __init__(self, tgt_format, mask_missing_images=False):
+    def __init__(self, tgt_format, mask_missing_images=False, max_views=1):
         self.tgt_format = tgt_format
         self.mask_missing_images = mask_missing_images
+        self.max_views = max_views
 
     def __call__(self, items):
         indices, images, presents, srcs, tgts = zip(*items)
         image = torch.stack(images) if images[0] is not None else None
-        # uint8 rather than bool, which PyTorch 1.1 does not have
-        present = torch.tensor(presents, dtype=torch.uint8) if image is not None and self.mask_missing_images else None
+        # one value per product, or per view (batch x views); uint8 rather than bool, which PyTorch 1.1 does not have
+        masked = image is not None and (self.mask_missing_images or self.max_views > 1)
+        present = torch.tensor(presents, dtype=torch.uint8) if masked else None
         src = pad_to_longest(srcs) if srcs[0] is not None else None
         if tgts[0] is None:
             tgt = None
@@ -282,18 +328,20 @@ class _Collate(object):
 class DataLoader(object):
     ''' Iterating over it gives the batches of an epoch as tuples (indices, image, src, tgt): the indices of the
     products in the data, the images (batch x 3 x 224 x 224; with mask_missing_images, MaskedImages of them and
-    their presence), the padded titles (batch x length) and the targets (a padded batch x length tensor for
+    their presence; with max_views > 1, MaskedImages of batch x views x 3 x 224 x 224 images and the presence
+    of the views), the padded titles (batch x length) and the targets (a padded batch x length tensor for
     'sequence', batch for 'chain', batch x attributes for 'attributes'); None for what the data does not
     have. '''
 
     def __init__(self, transform, image_dir, src_word2idx, tgt_word2idx, image_insts=None, src_insts=None,
                  tgt_insts=None, tgt_format='sequence', cuda=True, batch_size=64, shuffle=True, test=False,
-                 num_workers=0, batches=None, seed=None, mask_missing_images=False):
+                 num_workers=0, batches=None, seed=None, mask_missing_images=False, max_views=1):
         ''' image_insts, src_insts, tgt_insts: the instances of data.pt (preprocess.py); for the 'attributes'
         format, tgt_insts has one list per attribute. batches: lists of indices to use as the batches,
         instead of slices of batch_size (no shuffling). seed: shuffle and transform the images with this seed
         (see above) instead of the global random number generators. mask_missing_images: mark the products
-        without an image (see above). test: not used (kept from the original code). '''
+        without an image (see above). max_views: the view slots of a product (see above). test: not used (kept
+        from the original code). '''
         assert image_insts or src_insts
         assert tgt_format in TGT_FORMATS
         if isinstance(transform, _SeededTransform) and seed is None:
@@ -311,8 +359,8 @@ class DataLoader(object):
         self._src_word2idx = src_word2idx
         self._tgt_word2idx = tgt_word2idx
         self._dataset = _Instances(image_dir, transform, image_insts or None, src_insts or None, tgt_insts or None,
-                                   seed)
-        self._collate = _Collate(tgt_format, mask_missing_images)
+                                   seed, max_views)
+        self._collate = _Collate(tgt_format, mask_missing_images, max_views)
         self._num_workers = num_workers if image_insts else 0
         self._batches = batches
         self._seed = seed

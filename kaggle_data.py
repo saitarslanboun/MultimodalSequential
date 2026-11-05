@@ -93,6 +93,24 @@ def split_indices(n, seed, valid_size, test_size):
                         ('test', order[:test_size])])
 
 
+def fixed_test_split(products, test_ids, seed, valid_size):
+    ''' The product indices of the three sets with a fixed test set: the products whose id is in test_ids, in
+    their order. The validation set is the first valid_size (a number, or a fraction of the other products if
+    below 1) of a permutation of the other products drawn with numpy.random.RandomState(seed), the training set
+    the rest. '''
+    test_ids = set(test_ids)
+    test = [i for i, p in enumerate(products) if p.id in test_ids]
+    rest = [i for i, p in enumerate(products) if p.id not in test_ids]
+    n_valid = int(round(valid_size * len(rest))) if valid_size < 1 else int(valid_size)
+    if not test or n_valid < 1 or n_valid >= len(rest):
+        raise ValueError('the fixed test set needs at least one product, and the validation set at least one '
+                         'and fewer than the {} other products'.format(len(rest)))
+    order = np.random.RandomState(seed).permutation(len(rest)).tolist()
+    return OrderedDict([('train', [rest[k] for k in order[n_valid:]]),
+                        ('valid', [rest[k] for k in order[:n_valid]]),
+                        ('test', test)])
+
+
 def train_sentencepiece(data_dir, vocab_size, seed):
     ''' Trains a SentencePiece model on data_dir/train.tit (data_dir/sp.model and sp.vocab) and returns it. The
     model records the names of its input and output files, so it is trained in data_dir with the names
@@ -139,20 +157,30 @@ def prepare(kaggle_dir, output_dir, model_type, seed, valid_size=5000, test_size
 
 
 def prepare_products(products, checksum, source_dir, output_dir, model_type, seed, valid_size=5000,
-                     test_size=5000, sp_vocab_size=4000, distinct_unk=False, missing_values='', exclude_ids=''):
-    ''' The steps of prepare() for the products (Product) of a dataset in source_dir; hm_data.py prepares the H&M
-    data with them. checksum: the key and the checksum of the dataset's file, the first entry of split.json. '''
+                     test_size=5000, sp_vocab_size=4000, distinct_unk=False, missing_values='', exclude_ids='',
+                     test_ids=None, test_set=None):
+    ''' The steps of prepare() for the products (Product) of a dataset in source_dir; hm_data.py and
+    fashiongen_data.py prepare the H&M and FashionGen data with them. checksum: the key and the checksum of the
+    dataset's file, the first entry of split.json. test_ids: the ids of a fixed test set (fixed_test_split;
+    test_size is then not used), described by test_set in split.json. '''
     if not 0 <= seed < 2 ** 32:
         raise ValueError('the seed must be between 0 and 2**32 - 1')
     missing = [v for v in missing_values.split(',') if v]
     excluded = [i for i in exclude_ids.split(',') if i]
     products = [p for p in products if p.id not in excluded]
-    n_valid, n_test = split_sizes(valid_size, test_size, len(products))
+    if test_ids is None:
+        n_valid, n_test = split_sizes(valid_size, test_size, len(products))
+        splits = split_indices(len(products), seed, n_valid, n_test)
+    else:
+        splits = fixed_test_split(products, test_ids, seed, valid_size)
+        n_valid, n_test = len(splits['valid']), len(splits['test'])
     tgt_format = preprocess.TGT_FORMATS[model_type]
     settings = OrderedDict([checksum, ('seed', seed),
                             ('valid_size', n_valid), ('test_size', n_test), ('sp_vocab_size', sp_vocab_size),
                             ('tgt_format', tgt_format), ('distinct_unk', bool(distinct_unk)),
                             ('missing_values', missing), ('exclude_ids', excluded)])
+    if test_ids is not None:
+        settings['test_set'] = test_set
     split_file = os.path.join(output_dir, 'split.json')
     if os.path.exists(split_file):
         with io.open(split_file, encoding='utf-8') as f:
@@ -164,10 +192,13 @@ def prepare_products(products, checksum, source_dir, output_dir, model_type, see
     if not os.path.isdir(output_dir):
         os.makedirs(output_dir)
     path = lambda name: os.path.join(output_dir, name)
-    print('[Info] Splitting the {} products of {} with seed {}: {} training, {} validation, {} test'.format(
-        len(products), source_dir, seed, len(products) - n_valid - n_test, n_valid, n_test))
+    if test_ids is None:
+        print('[Info] Splitting the {} products of {} with seed {}: {} training, {} validation, {} test'.format(
+            len(products), source_dir, seed, len(products) - n_valid - n_test, n_valid, n_test))
+    else:
+        print('[Info] The {} products of {} with seed {}: {} training and {} validation drawn with the seed, '
+              '{} test ({})'.format(len(products), source_dir, seed, len(splits['train']), n_valid, n_test, test_set))
 
-    splits = split_indices(len(products), seed, n_valid, n_test)
     for name, indices in splits.items():
         items = [products[i] for i in indices]
         write_lines(path(name + '.img'), [p.image for p in items])

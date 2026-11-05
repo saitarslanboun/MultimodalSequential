@@ -1,0 +1,31 @@
+{
+  "description": "Attentive MultiTask on the FashionGen data (its test set; validation drawn with -seed), image input",
+  "model_type": "multitask_att",
+  "modality": "img",
+  "fashiongen": {
+    "valid_size": 5000,
+    "sp_vocab_size": 4000,
+    "distinct_unk": true
+  },
+  "train": {
+    "batch_size": 32,
+    "d_model": 1024,
+    "n_warmup_steps": 4000,
+    "save_mode": "best",
+    "patience": 3,
+    "select_by": "chain_accuracy",
+    "label_smoothing": 0.1,
+    "train_crop": "resize_random_crop",
+    "valid_crop": "center_crop",
+    "frozen_resnet": true,
+    "max_views": 6
+  },
+  "translate": {
+    "batch_size": 64,
+    "test_crop": "center_crop",
+    "deterministic": true
+  },
+  "evaluate": {
+    "n_attributes": 6
+  }
+}

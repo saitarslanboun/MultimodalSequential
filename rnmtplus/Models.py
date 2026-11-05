@@ -17,6 +17,12 @@ The image input is a batch of images, or MaskedImages: the images and their pres
 -mask_missing_images). The models leave out the image of an absent product: its image features are zero, the
 attention of the attentive baselines leaves out its regions, and the Sequential decoder gets no image context
 for it. Its text and targets are used as usual.
+
+With several views per product (train.py -max_views, FashionGen), the image input is MaskedImages of batch x
+views images and the presence of each view. The ResNet encodes every present view; the regions of all views,
+one view after the other, are the image features, with a learned embedding of each view slot added to its
+regions (zero at the start). The attention of the Sequential decoder and of the attentive baselines attends to
+the regions of the present views only, and the other baselines average them.
 '''
 
 from collections import namedtuple
@@ -47,7 +53,9 @@ def uses_image(modality):
 
 class MaskedImages(namedtuple('MaskedImages', ['images', 'present'])):
     ''' A batch of images (or of their features) with present, a uint8 tensor with one value per image: 0 for
-    a product without an image, whose image the models leave out (see above). '''
+    a product without an image, whose image the models leave out (see above). For several views per product
+    (batch x views images), one value per view: 0 for a view the product does not have; for their features
+    (batch x regions), one value per region. '''
     __slots__ = ()
 
 
@@ -74,6 +82,13 @@ def masked_avg_pool(states, mask):
     return (states * mask).sum(1) / mask.sum(1)
 
 
+def region_avg_pool(states, regions):
+    ''' The average over the regions of the present views (regions: 1 for them); zero for a product without
+    any. '''
+    mask = regions.unsqueeze(2).to(states.dtype)
+    return (states * mask).sum(1) / mask.sum(1).clamp(min=1)
+
+
 class ImageEncoder(nn.Module):
     ''' ResNet-50 up to layer3: a 14x14 grid of 1024-dimensional features for a 224x224 image. '''
 
@@ -85,6 +100,19 @@ class ImageEncoder(nn.Module):
     def forward(self, images):
         A = self.resnet_conv(images)
         return A.view(A.size(0), A.size(1), -1).transpose(1, 2)
+
+    def encode_views(self, images, present):
+        ''' The features of several views per product (images: batch x views x 3 x size x size; present: batch x
+        views): batch x views x regions x features, zero for the views that are not present, which the ResNet
+        does not compute. '''
+        batch, n_views = images.shape[:2]
+        flat = images.reshape((batch * n_views,) + tuple(images.shape[2:]))
+        index = present.reshape(-1).nonzero().view(-1)
+        A = self.forward(flat.index_select(0, index) if index.numel() else flat[:1])
+        features = A.new_zeros((batch * n_views,) + tuple(A.shape[1:]))
+        if index.numel():
+            features.index_copy_(0, index, A)
+        return features.view((batch, n_views) + tuple(A.shape[1:]))
 
 
 class TextEncoder(nn.Module):
@@ -157,9 +185,11 @@ class Decoder(nn.Module):
                         dec_states, encoder_states, encoder_states, src_mask)
                     contexts.append(context_txt)
                 if self.use_image:
-                    context_img, img_attention = self.attention_img(dec_states, V, V)
-                    if present is not None:
-                        context_img = context_img * per_image(present, context_img)
+                    regions = present if present is not None and present.dim() == 2 else None
+                    context_img, img_attention = self.attention_img(dec_states, V, V, regions)
+                    if present is not None:  # no image context for a product without an image (or any view)
+                        product = present if regions is None else regions.max(1)[0]
+                        context_img = context_img * per_image(product, context_img)
                     contexts.append(context_img)
             else:
                 prev_states = dec_states
@@ -184,12 +214,37 @@ class _Model(nn.Module):
         frozen = set(map(id, self.image_encoder.parameters())) if hasattr(self, 'image_encoder') else set()
         return (p for p in self.parameters() if id(p) not in frozen)
 
+    def _add_view_embedding(self, max_views, d_model):
+        ''' For several views per product (max_views > 1): a learned embedding of each view slot, added to the
+        features of the regions of its view. It starts at zero and draws no random numbers, so that the other
+        weights start as without it. '''
+        if max_views > 1:
+            self.view_embedding = nn.Parameter(torch.zeros(max_views, d_model))
+
+    def image_features(self, image):
+        ''' The image features (batch x regions x features) and their presence: None (all present), one value
+        per product (MaskedImages of single images), or for several views (MaskedImages of batch x views images)
+        one value per region: the regions of the views one after the other, with the embedding of their view
+        slot added, and zero for a view that is not present. '''
+        images, present = split_images(image)
+        if images.dim() == 4:
+            return self.image_encoder(images), present
+        batch, n_views = images.shape[:2]
+        if n_views != self.view_embedding.size(0):
+            raise ValueError('{} view slots; the model has {}'.format(n_views, self.view_embedding.size(0)))
+        if present is None:
+            present = images.new_ones((batch, n_views), dtype=torch.uint8)
+        V = self.image_encoder.encode_views(images, present)
+        V = (V + self.view_embedding.view(1, n_views, 1, -1)) * present.view(batch, n_views, 1, 1).to(V.dtype)
+        regions = present.view(batch, n_views, 1).expand(-1, -1, V.size(2)).reshape(batch, -1)
+        return V.reshape(batch, -1, V.size(3)), regions
+
 
 class SequentialModel(_Model):
     ''' The Sequential model: an RNMT+ decoder that generates the attribute chain one attribute at a time. '''
 
     def __init__(self, modality, n_src_vocab, n_tgt_vocab, n_layers=6, n_head=8, d_word_vec=1024,
-                 d_model=1024, dropout=0.1, pretrained=True):
+                 d_model=1024, dropout=0.1, pretrained=True, max_views=1):
         super(SequentialModel, self).__init__()
         assert d_model == d_word_vec, \
             'To facilitate the residual connections, the dimensions of all module output shall be the same.'
@@ -205,15 +260,16 @@ class SequentialModel(_Model):
         self.tgt_word_proj = nn.Linear(d_model, n_tgt_vocab, bias=False)
         self.dropout = nn.Dropout(dropout)  # not used
         self.d_model = d_model
+        if uses_image(modality):
+            self._add_view_embedding(max_views, d_model)
         self._freeze_image_encoder()
 
     def encode(self, image, src_seq):
         ''' The image features and the text encoder outputs (None for a missing input). For MaskedImages, the
-        features are MaskedImages too. '''
+        features are MaskedImages too (image_features). '''
         V = None
         if uses_image(self.modality):
-            images, present = split_images(image)
-            V = self.image_encoder(images)
+            V, present = self.image_features(image)
             if present is not None:
                 V = MaskedImages(V, present)
         encoder_outputs = self.text_encoder(src_seq) if uses_text(self.modality) else None
@@ -236,14 +292,15 @@ class AttributeModel(_Model):
 
     def __init__(self, model_type, modality, n_src_vocab, n_tgt_vocab, n_layers=6, n_head=8, d_word_vec=1024,
                  d_model=1024, dropout=0.1, proj1_bias=True, unused_slf_attention=False, pretrained=True,
-                 mask_padding=False):
+                 mask_padding=False, max_views=1):
         ''' n_tgt_vocab: the number of classes (multiclass), of attribute values (multilabel), or the list of
         the vocabulary sizes of the attributes (multitask models). proj1_bias: whether the first projection
         of the attentive models has a bias (not in the Rakuten text+image experiments).
         unused_slf_attention: an attention module that the Rakuten text+image Self-Attentive MultiTask had
         but did not use; needed to load its checkpoint. mask_padding: the average pooling and the attention
         use only the tokens of the titles, not the padding of the batch, as the attention of the sequential
-        model does; the original code included the padding. '''
+        model does; the original code included the padding. max_views: the view slots of a product (1: one
+        image). '''
         super(AttributeModel, self).__init__()
         assert model_type in MODEL_TYPES and model_type != 'sequential'
         self.model_type = model_type
@@ -275,22 +332,22 @@ class AttributeModel(_Model):
         self.d_model = d_model
         self.n_tgt_vocab = n_tgt_vocab
         self.mask_padding = mask_padding
+        if uses_image(modality):
+            self._add_view_embedding(max_views, d_model)
         self._freeze_image_encoder()
 
     def forward(self, image, src_seq):
         ''' The scores: one tensor (multiclass, multilabel) or one tensor per attribute (multitask models). '''
-        images, present = split_images(image)
-        V = self.image_encoder(images) if uses_image(self.modality) else None
-        if V is None:
-            present = None
-        elif present is not None:  # zero features for an absent image
+        V, present = self.image_features(image) if uses_image(self.modality) else (None, None)
+        if present is not None and present.dim() == 1:  # zero features for an absent image
             V = V * per_image(present, V)
         T, src_mask = self.text_encoder(src_seq) if uses_text(self.modality) else (None, None)
         if not self.mask_padding:
             src_mask = None
         encodings = [X for X in (V, T) if X is not None]
-        pooled = [masked_avg_pool(X, src_mask) if X is T and src_mask is not None else avg_pool(X)
-                  for X in encodings]
+        views = present is not None and present.dim() == 2  # the regions of several views
+        pooled = [masked_avg_pool(X, src_mask) if X is T and src_mask is not None else
+                  (region_avg_pool(X, present) if X is V and views else avg_pool(X)) for X in encodings]
         features = pooled[0] if len(pooled) == 1 else torch.cat(pooled, dim=1)
         if self.model_type in ('multiclass', 'multilabel'):
             return self.tgt_word_proj(features)
@@ -307,8 +364,8 @@ class AttributeModel(_Model):
         mask = None
         if src_mask is not None and present is None:  # attend to the tokens of the titles, the image regions
             mask = torch.cat([src_mask if X is T else src_mask.new_ones(X.shape[:2]) for X in memory], dim=1)
-        elif present is not None:  # also leave out the regions of an absent image
-            regions = present.long().unsqueeze(1).expand(-1, V.shape[1])
+        elif present is not None:  # also leave out the regions of an absent image, or of the absent views
+            regions = present.long().unsqueeze(1).expand(-1, V.shape[1]) if present.dim() == 1 else present.long()
             mask = torch.cat([regions if X is V else (src_mask if X is T and src_mask is not None
                                                        else regions.new_ones(X.shape[:2])) for X in memory], dim=1)
         memory = memory[0] if len(memory) == 1 else torch.cat(memory, dim=1)
@@ -322,7 +379,7 @@ def build_model(opt, pretrained=True):
     pretrained: load the ImageNet weights into the ResNet (not needed when a checkpoint is loaded). '''
     kwargs = dict(n_layers=getattr(opt, 'n_layers', 6), n_head=getattr(opt, 'n_head', 8),
                   d_word_vec=getattr(opt, 'd_word_vec', opt.d_model), d_model=opt.d_model,
-                  dropout=opt.dropout, pretrained=pretrained)
+                  dropout=opt.dropout, pretrained=pretrained, max_views=getattr(opt, 'max_views', 1))
     n_src_vocab = getattr(opt, 'src_vocab_size', None)
     if opt.model_type == 'sequential':
         return SequentialModel(opt.modality, n_src_vocab, opt.tgt_vocab_size, **kwargs)
@@ -334,7 +391,7 @@ def build_model(opt, pretrained=True):
 
 def architecture_from_state_dict(state_dict):
     ''' What the parameter names of a checkpoint tell about the model: the modality, proj1_bias,
-    unused_slf_attention, and the model type if it is unambiguous (else None). '''
+    unused_slf_attention, max_views, and the model type if it is unambiguous (else None). '''
     keys = list(state_dict.keys())
     has = lambda prefix: any(k.startswith(prefix) for k in keys)
     image, text = has('image_encoder.'), has('text_encoder.')
@@ -347,4 +404,5 @@ def architecture_from_state_dict(state_dict):
         model_type = None  # multiclass or multilabel; multitask_att or multitask_slfatt
     return {'modality': modality, 'model_type': model_type,
             'proj1_bias': 'tgt_word_projs1.0.bias' in keys,
-            'unused_slf_attention': has('slf_attention.')}
+            'unused_slf_attention': has('slf_attention.'),
+            'max_views': state_dict['view_embedding'].size(0) if 'view_embedding' in state_dict else 1}

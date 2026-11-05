@@ -1,7 +1,8 @@
 ''' A quick end-to-end check with synthetic data: for every settings file in experiments/ (or the given ones),
 run.py vocab, preprocess, train (two epochs of a smaller model), translate and evaluate. The settings in
 experiments/kaggle_seeded/ get a synthetic styles.csv and images/, those in experiments/hm_seeded/ a synthetic
-articles.csv and images/, and run train (-seed 1), translate and evaluate.
+articles.csv and images/, those in experiments/fashiongen_seeded/ a synthetic products.csv and images/ (as
+fashiongen_export.py writes them), and run train (-seed 1), translate and evaluate.
 
     python tests/smoke_test.py [SETTINGS ...] [-keep DIR] [-no_cuda]
 
@@ -43,6 +44,8 @@ KAGGLE_VALUES = [['Men', 'Women', 'Unisex'], ['Apparel', 'Footwear'], ['Topwear'
 # small data.
 KAGGLE_OPTIONS = ['-seed', '1', '-valid_size', str(SIZES['valid']), '-test_size', str(SIZES['test']),
                   '-sp_vocab_size', '40']
+# The settings of the data split with a seed and the directory of their synthetic data.
+SEEDED_RAW = {'kaggle_seeded': 'kaggle_raw', 'hm_seeded': 'hm_raw', 'fashiongen_seeded': 'fashiongen_raw'}
 HM_HEADER = ['article_id', 'product_code', 'prod_name', 'product_type_no', 'product_type_name', 'product_group_name',
              'graphical_appearance_no', 'graphical_appearance_name', 'colour_group_code', 'colour_group_name',
              'perceived_colour_value_id', 'perceived_colour_value_name', 'perceived_colour_master_id',
@@ -62,6 +65,13 @@ HM_VALUES = [('product_type', [('253', 'Vest top'), ('272', 'Trousers'), ('-1', 
              ('index_group', [('1', 'Ladieswear'), ('3', 'Menswear')]),
              ('section', [('16', 'Womens Everyday Basics'), ('26', 'Mens Underwear')]),
              ('garment_group', [('1002', 'Jersey Basic'), ('1001', 'Unknown')])]
+FASHIONGEN_HEADER = ['product_id', 'split', 'name', 'description', 'gender', 'department', 'category', 'subcategory',
+                     'season', 'brand', 'msrpUSD', 'composition', 'concat_description', 'poses']
+# The department, category and subcategory choices of the synthetic FashionGen data: a hierarchy with a
+# subcategory name under two categories, as SHIRTS in the release.
+FASHIONGEN_TREE = [('CLOTHING', 'SHIRTS', 'SHIRTS'), ('CLOTHING', 'TOPS', 'SHIRTS'), ('CLOTHING', 'TOPS', 'T-SHIRTS'),
+                   ('CLOTHING', 'JACKETS & COATS', 'BOMBERS'), ('SHOES', 'SNEAKERS', 'LOW TOP SNEAKERS')]
+FASHIONGEN_BRANDS = ['Acne Studios', u'Chlo\xe9', u'Comme des Gar\xe7ons']
 
 
 def write(path, lines):
@@ -121,13 +131,46 @@ def make_hm_data(root, rng):
             image.save(os.path.join(root, 'images', article[:3], article + '.jpg'))
 
 
+def make_fashiongen_data(root, rng):
+    ''' A synthetic products.csv and images/ as fashiongen_export.py writes them: the last SIZES['test'] products
+    are those of the release's validation file (the fixed test set); products with one to six views, with gaps,
+    and one without any; descriptions with commas and quotes; brands with accents. '''
+    os.makedirs(os.path.join(root, 'images'))
+    n = sum(SIZES.values())
+    with io.open(os.path.join(root, 'products.csv'), 'w', encoding='utf-8', newline='') as f:
+        writer = csv.writer(f, lineterminator='\n')
+        writer.writerow(FASHIONGEN_HEADER)
+        for k in range(n):
+            product = str(150000 + 7 * k)
+            department, category, subcategory = rng.choice(FASHIONGEN_TREE)
+            views = [] if k == 7 else sorted(rng.sample(range(1, 7), rng.randint(1, 6)))
+            poses = ['id_gridfs_%d' % v for v in views]
+            description = ' '.join(rng.choice(WORDS) for _ in range(rng.randint(4, 12))).capitalize() + '.'
+            if k % 5 == 0:
+                description += ' With "' + rng.choice(WORDS) + '", ' + rng.choice(WORDS) + '.'
+            writer.writerow([product, 'validation' if k >= n - SIZES['test'] else 'train',
+                             ' '.join(rng.choice(WORDS) for _ in range(rng.randint(2, 5))).title(), description,
+                             rng.choice(['Men', 'Women']), department, category, subcategory,
+                             rng.choice(['SS2017', 'FW2017']), rng.choice(FASHIONGEN_BRANDS),
+                             '%d.0' % rng.randrange(100, 900), '100% cotton.', description + ' Trousers in black.',
+                             ' '.join(poses)])
+            for pose in poses:
+                directory = os.path.join(root, 'images', product)
+                if not os.path.isdir(directory):
+                    os.makedirs(directory)
+                a = np.full((256, 256, 3), rng.randrange(256), dtype=np.uint8)
+                a[rng.randrange(128):, rng.randrange(128):] = [rng.randrange(256) for _ in range(3)]
+                Image.fromarray(a).save(os.path.join(directory, pose + '.png'))
+
+
 def make_data(root):
     ''' Synthetic data in the file formats of the three datasets; root/images holds the images, root/kaggle_raw
     the synthetic Kaggle data for experiments/kaggle_seeded, root/hm_raw the synthetic H&M data for
-    experiments/hm_seeded. '''
+    experiments/hm_seeded, root/fashiongen_raw the synthetic FashionGen data for experiments/fashiongen_seeded. '''
     rng = random.Random(0)
     make_kaggle_data(os.path.join(root, 'kaggle_raw'), rng)
     make_hm_data(os.path.join(root, 'hm_raw'), random.Random(1))
+    make_fashiongen_data(os.path.join(root, 'fashiongen_raw'), random.Random(2))
     os.makedirs(os.path.join(root, 'images'))
     for k in range(10):
         a = np.full((256, 256, 3), rng.randrange(256), dtype=np.uint8)
@@ -179,8 +222,8 @@ def main():
                  '-num_workers', '2'] + cuda
         translate = ['-checkpoint', os.path.join(work, 'models', 'model.best.chkpt'), '-batch_size', '4',
                      '-num_workers', '2'] + cuda
-        if dataset in ('kaggle_seeded', 'hm_seeded'):
-            raw = 'kaggle_raw' if dataset == 'kaggle_seeded' else 'hm_raw'
+        if dataset in SEEDED_RAW:
+            raw = SEEDED_RAW[dataset]
             base = [sys.executable, os.path.join(REPO, 'run.py'), path, None,
                     '-data_dir', os.path.join(root, raw), '-work_dir', work]
             stages = [('train', train + KAGGLE_OPTIONS), ('translate', translate), ('evaluate', [])]

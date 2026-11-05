@@ -26,7 +26,9 @@ Kaggle data (styles.csv and images/), and there are no vocab and preprocess stag
     python run.py SETTINGS evaluate -data_dir KAGGLE -work_dir WORK
 
 The settings in experiments/hm_seeded/ do the same with the H&M data (hm_data.py): DATA is then the directory of
-articles.csv and images/.
+articles.csv and images/. Those in experiments/fashiongen_seeded/ with the FashionGen data (fashiongen_data.py):
+DATA is the export of fashiongen_export.py (products.csv and images/), whose test set is fixed and whose
+validation set -seed draws.
 '''
 
 import argparse
@@ -123,12 +125,13 @@ def exclude_products(settings, opt):
 # The datasets split with -seed: the key of their settings, the option of train.py, the name, the data
 # directory option of train.py.
 SPLIT_DATASETS = OrderedDict([('kaggle', ('-kaggle_dir', 'Kaggle', '-kaggle_data_dir')),
-                              ('hm', ('-hm_dir', 'H&M', '-split_data_dir'))])
+                              ('hm', ('-hm_dir', 'H&M', '-split_data_dir')),
+                              ('fashiongen', ('-fashiongen_dir', 'FashionGen', '-split_data_dir'))])
 
 
 def split_commands(settings, opt):
-    ''' The commands of the stage for the Kaggle or H&M data split with -seed (experiments/kaggle_seeded,
-    experiments/hm_seeded): train prepares the data in WORK/data. '''
+    ''' The commands of the stage for the Kaggle, H&M or FashionGen data split with -seed (experiments/kaggle_seeded,
+    experiments/hm_seeded, experiments/fashiongen_seeded): train prepares the data in WORK/data. '''
     key = next(k for k in SPLIT_DATASETS if k in settings)
     option, name, data_option = SPLIT_DATASETS[key]
     work = lambda name: os.path.join(opt.work_dir, name)
@@ -225,9 +228,10 @@ def main():
     parser.add_argument('stage', choices=STAGES)
     parser.add_argument('-data_dir', required=True,
                         help='the data files of the dataset (experiments/kaggle_seeded: the Kaggle data; '
-                             'experiments/hm_seeded: the H&M data)')
-    parser.add_argument('-image_dir', help='the images (image models; experiments/kaggle_seeded and hm_seeded: '
-                                           'default DATA/images)')
+                             'experiments/hm_seeded: the H&M data; experiments/fashiongen_seeded: the export of '
+                             'fashiongen_export.py)')
+    parser.add_argument('-image_dir', help='the images (image models; experiments/kaggle_seeded, hm_seeded and '
+                                           'fashiongen_seeded: default DATA/images)')
     parser.add_argument('-work_dir', default='.', help='for data.pt, vocabularies, models, logs and predictions')
     parser.add_argument('-split', choices=sorted(PREDICTIONS), default='test', help='translate, evaluate')
     parser.add_argument('-checkpoint', help='translate: the checkpoint to use')
